@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "seed": "ts-node --project scripts/tsconfig.json scripts/setup-demo.ts",
+    "create-org": "ts-node --project scripts/tsconfig.json scripts/create-org.ts",
     "deploy:indexes": "firebase deploy --only firestore:indexes",
     "deploy:rules": "firebase deploy --only firestore:rules",
     "test:rules": "firebase emulators:exec --only firestore \"npm run test:rules:run\"",
