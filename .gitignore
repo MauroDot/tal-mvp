@@ -43,3 +43,6 @@ serviceAccountKey.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+*.msi
+firestore-debug.log
+firebase-debug.log

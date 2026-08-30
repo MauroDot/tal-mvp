@@ -19,6 +19,9 @@ const eslintConfig = defineConfig([
     // scripts/ is CommonJS Node tooling (its own tsconfig, run via ts-node),
     // not part of the Next.js app.
     "scripts/**",
+    // tests/ is the Firestore rules test suite (own tsconfig, run via
+    // vitest against the emulator), not part of the Next.js app.
+    "tests/**",
   ]),
 ]);
 

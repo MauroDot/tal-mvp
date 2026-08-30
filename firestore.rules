@@ -1,0 +1,177 @@
+rules_version = '2';
+
+// FleetReady / Tactical Asset Log multi-tenant security rules.
+//
+// NOTE: written against the schema this codebase actually has (see
+// src/types, src/services/*, functions/src/index.ts) — I do not have
+// access to "the blueprint (§14)" referenced when this file was
+// requested; no such document exists anywhere in this repo. Everywhere
+// the request text was silent or ambiguous, that's called out inline
+// with "INTERPRETATION:" so it's easy to find on review.
+//
+// Anything not matched by an explicit `allow` below is denied by
+// Firestore's own default-deny behavior — there is no need for (and this
+// file does not include) a catch-all `match /{document=**}` block.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- Helpers -----------------------------------------------------
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // The core multi-tenant boundary. True only if the requester has a
+    // profile document under THIS SPECIFIC org's users subcollection —
+    // not just "signed in", and not "a member of some org". Every rule
+    // below that touches organizations/{orgId}/** goes through this (or
+    // hasRole, which implies it), which is what stops an org-A user from
+    // reading org-B's data by changing the orgId in a request.
+    function isOrgMember(orgId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/organizations/$(orgId)/users/$(request.auth.uid));
+    }
+
+    // Only valid to call where isOrgMember(orgId) is already known true
+    // (every caller below is && short-circuited that way) — otherwise
+    // this reads a document that may not exist.
+    function userRole(orgId) {
+      return get(/databases/$(database)/documents/organizations/$(orgId)/users/$(request.auth.uid)).data.role;
+    }
+
+    function hasRole(orgId, roles) {
+      return isOrgMember(orgId) && userRole(orgId) in roles;
+    }
+
+    // ---- userOrgs/{uid} ------------------------------------------------
+    // Top-level, not nested under organizations/{orgId} — this is the
+    // uid -> orgId lookup useAuth() reads before it even knows which org
+    // to look the profile up in (see src/services/organizationService.ts,
+    // getUserOrgId). Readable only by that uid; no client write path (it's
+    // provisioned by scripts/setup-demo.ts via the Admin SDK, which
+    // bypasses these rules entirely).
+    match /userOrgs/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // ---- organizations/{orgId} and everything under it -----------------
+    match /organizations/{orgId} {
+
+      // The org document itself (name/isActive/settings). Members can
+      // read it; no client write path exists or was specified.
+      allow read: if isOrgMember(orgId);
+      allow write: if false;
+
+      // INTERPRETATION: not in the given role-gate list, but something
+      // has to govern this — it's the collection isOrgMember/hasRole
+      // themselves depend on, and the app reads other members' profiles
+      // constantly (officer-name resolution on the dashboard, /fleet,
+      // and vehicle detail pages). Read open to any org member; write
+      // denied entirely — a user editing their own `role` field would be
+      // a privilege-escalation hole, so profile changes stay
+      // admin-console/Cloud-Function-only until a real "edit profile"
+      // flow (with field-level restrictions) exists.
+      match /users/{userId} {
+        allow read: if isOrgMember(orgId);
+        allow write: if false;
+      }
+
+      match /vehicles/{vehicleId} {
+        allow read: if isOrgMember(orgId);
+        allow write: if hasRole(orgId, ['admin', 'fleet_manager']);
+      }
+
+      match /equipment/{equipmentId} {
+        allow read: if isOrgMember(orgId);
+        allow write: if hasRole(orgId, ['admin', 'equipment_manager']);
+      }
+
+      match /inspections/{inspectionId} {
+        allow read: if isOrgMember(orgId);
+        allow create: if isOrgMember(orgId) &&
+          request.resource.data.inspectorUserId == request.auth.uid;
+        // The original inspector may update their own inspection only
+        // while it's still incomplete — this is what makes
+        // completeInspection() in src/services/inspectionService.ts work
+        // (it updateDocs items/overallResult/completedAt onto the same
+        // doc startInspection created). `resource.data` here is the
+        // pre-write state, so gating on it being still-unset is what
+        // makes a completed inspection immutable to clients afterward —
+        // this same condition permits the exact write that sets
+        // completedAt, then blocks every write after that one.
+        allow update: if isOrgMember(orgId) &&
+          resource.data.inspectorUserId == request.auth.uid &&
+          resource.data.get('completedAt', null) == null;
+      }
+
+      match /inspectionTemplates/{templateId} {
+        allow read: if isOrgMember(orgId);
+        allow write: if hasRole(orgId, ['admin']);
+      }
+
+      match /issues/{issueId} {
+        allow read: if isOrgMember(orgId);
+        // No ownership constraint on create, matching "create for any
+        // member" as given — anyone in the org can file an issue
+        // attributed to any reportedByUserId, not just themselves.
+        allow create: if isOrgMember(orgId);
+        allow update: if isOrgMember(orgId) && (
+          resource.data.reportedByUserId == request.auth.uid ||
+          userRole(orgId) in ['admin', 'fleet_manager', 'supervisor']
+        );
+      }
+
+      match /workOrders/{workOrderId} {
+        allow read: if isOrgMember(orgId);
+        allow write: if hasRole(orgId, ['admin', 'fleet_manager', 'supervisor']);
+      }
+
+      // INTERPRETATION: "read per role" wasn't specified further. Alerts
+      // carry their own targeting (recipientUserId / recipientRole — see
+      // Alert in src/types), so read access mirrors that: an alert
+      // addressed to you personally or to your role, plus broad
+      // visibility for the same management roles that can write
+      // workOrders. Write is denied outright either way — Cloud
+      // Functions create every Alert via the Admin SDK
+      // (functions/src/index.ts), which bypasses Security Rules
+      // entirely; this only blocks direct client writes.
+      match /alerts/{alertId} {
+        allow read: if isOrgMember(orgId) && (
+          resource.data.recipientUserId == request.auth.uid ||
+          resource.data.recipientRole == userRole(orgId) ||
+          userRole(orgId) in ['admin', 'fleet_manager', 'supervisor']
+        );
+        allow write: if false;
+      }
+
+      // INTERPRETATION: also "read per role" with no further detail.
+      // AuditLog has no per-entry targeting field to key off of (unlike
+      // Alert), so this restricts the whole audit trail to management
+      // roles rather than every member — an officer generally shouldn't
+      // see the full history of org-wide status changes. Write denied for
+      // the same Admin-SDK-bypass reason as alerts.
+      match /auditLogs/{auditLogId} {
+        allow read: if hasRole(orgId, ['admin', 'fleet_manager', 'supervisor']);
+        allow write: if false;
+      }
+
+      // Cloud-Functions-only counter doc (getNextWorkOrderNumber in
+      // functions/src/index.ts) — written via the Admin SDK, which
+      // bypasses these rules; no client needs any access to it at all.
+      match /counters/{counterId} {
+        allow read, write: if false;
+      }
+
+      // Read for org members, write for admin/fleet_manager — as given.
+      // NOTE this write set is admin/fleet_manager only, narrower than
+      // workOrders' admin/fleet_manager/supervisor — worth double-checking
+      // that's deliberate and not a shorthand for "same as workOrders"
+      // (which would include supervisor).
+      match /maintenanceRecords/{recordId} {
+        allow read: if isOrgMember(orgId);
+        allow write: if hasRole(orgId, ['admin', 'fleet_manager']);
+      }
+    }
+  }
+}
