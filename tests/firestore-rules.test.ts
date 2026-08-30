@@ -182,6 +182,38 @@ describe("isOrgMember requires isActive:true — deactivation blocks access imme
   });
 });
 
+describe("organizations/{orgId}: read for any member, update for admin only, create/delete always denied", () => {
+  it("denies an officer updating the org", async () => {
+    const officerA = ctxFor("officer-a");
+    await assertFails(
+      setDoc(doc(officerA, "organizations", ORG_A), { name: "Hacked Name" }, { merge: true })
+    );
+  });
+
+  it("denies a fleet_manager updating the org", async () => {
+    const managerA = ctxFor("manager-a");
+    await assertFails(
+      setDoc(doc(managerA, "organizations", ORG_A), { name: "Manager's Org" }, { merge: true })
+    );
+  });
+
+  it("allows an admin to update the org's name and settings", async () => {
+    const adminA = ctxFor("admin-a");
+    await assertSucceeds(
+      setDoc(
+        doc(adminA, "organizations", ORG_A),
+        { name: "Renamed Org A", settings: { inspectionIntervalDays: 14 } },
+        { merge: true }
+      )
+    );
+  });
+
+  it("denies an admin deleting the org", async () => {
+    const adminA = ctxFor("admin-a");
+    await assertFails(deleteDoc(doc(adminA, "organizations", ORG_A)));
+  });
+});
+
 describe("vehicles: read for any member, write for admin/fleet_manager", () => {
   it("denies an officer creating a vehicle", async () => {
     const officerA = ctxFor("officer-a");

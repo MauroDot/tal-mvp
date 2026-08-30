@@ -75,9 +75,23 @@ service cloud.firestore {
     match /organizations/{orgId} {
 
       // The org document itself (name/isActive/settings). Members can
-      // read it; no client write path exists or was specified.
+      // read it. Write is a narrow, deliberate addition beyond the
+      // original "no client write path" design: admins can edit the org
+      // name and inspection-interval setting (admin/settings/page.tsx),
+      // via organizationService.updateOrganization — a direct rule
+      // rather than routing through a Cloud Function like `users` does,
+      // because this document carries no permission/role data. Unlike a
+      // user editing their own `role` (privilege escalation), an admin
+      // editing their own org's display name or inspection cadence isn't
+      // a security boundary this rule needs to route around — it's
+      // exactly the kind of write hasRole()-gated rules already grant
+      // directly elsewhere (vehicles, inspectionTemplates, workOrders).
+      // create/delete stay denied — orgs are provisioned out-of-band
+      // (scripts/setup-demo.ts, via the Admin SDK) and never deleted by
+      // this app.
       allow read: if isOrgMember(orgId);
-      allow write: if false;
+      allow update: if hasRole(orgId, ['admin']);
+      allow create, delete: if false;
 
       // INTERPRETATION: not in the given role-gate list, but something
       // has to govern this — it's the collection isOrgMember/hasRole

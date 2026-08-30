@@ -16,6 +16,8 @@ export const ROUTE_ROLES: {
   vehicleManagement: UserRole[];
   templates: UserRole[];
   users: UserRole[];
+  admin: UserRole[];
+  orgSettings: UserRole[];
 } = {
   fleet: ["admin", "fleet_manager", "supervisor"],
   // Same role set as fleet today (and matches the workOrders/issues-update
@@ -38,4 +40,30 @@ export const ROUTE_ROLES: {
   // actually lets call inviteOrgUser/changeOrgUserRole/deactivateOrgUser/
   // reactivateOrgUser. Gates /admin/users and its invite subroute.
   users: ["admin"],
+  // The admin home hub (/admin) — links to Users/Templates/Fleet/Settings
+  // with org-wide counts. Also where landingPathForRole sends an admin
+  // right after sign-in.
+  admin: ["admin"],
+  // Matches the organizations/{orgId} update rule in firestore.rules
+  // exactly. Gates /admin/settings.
+  orgSettings: ["admin"],
 };
+
+/**
+ * Where a signed-in user lands right after authenticating (or on
+ * visiting `/` while already signed in) — role-aware, since "My
+ * Vehicles" (/dashboard) is an officer's view and isn't where a
+ * fleet_manager/supervisor/admin wants to end up. Falls back to
+ * /dashboard for every role not explicitly routed elsewhere
+ * (officer, equipment_manager, readonly) — it's open to any
+ * authenticated user regardless of role (see useRequireRole's callers).
+ */
+export function landingPathForRole(role: UserRole | null | undefined): string {
+  if (role === "admin") {
+    return "/admin";
+  }
+  if (role === "fleet_manager" || role === "supervisor") {
+    return "/fleet";
+  }
+  return "/dashboard";
+}

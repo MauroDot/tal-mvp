@@ -7,6 +7,7 @@
  */
 import {
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   onAuthStateChanged,
@@ -38,6 +39,17 @@ export async function signIn(email: string, password: string): Promise<UserCrede
  */
 export async function signOut(): Promise<void> {
   return firebaseSignOut(auth);
+}
+
+/**
+ * Sends a password-reset email for `email`, if an account exists for it.
+ * Callers should NOT surface whether this throws (e.g. `auth/user-not-found`)
+ * to the user — doing so would let the login page be used to check which
+ * emails are registered. Show the same generic confirmation regardless of
+ * outcome (see auth/login/page.tsx).
+ */
+export async function resetPassword(email: string): Promise<void> {
+  return sendPasswordResetEmail(auth, email);
 }
 
 /**

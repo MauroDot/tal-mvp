@@ -2,24 +2,27 @@
 
 /**
  * React hook that tracks Firebase Auth state and the corresponding
- * Firestore user profile.
+ * Firestore user profile (and that profile's Organization).
  *
  * Subscribes to `onAuthStateChanged` on mount; whenever the Firebase user
- * changes, it fetches the matching profile via `organizationService` and
- * exposes both, along with loading/error state and a `logout` helper.
+ * changes, it fetches the matching profile — then, once that succeeds,
+ * the org doc — via `organizationService`, and exposes all of it along
+ * with loading/error state and a `logout` helper.
  */
 import { useCallback, useEffect, useState } from "react";
 import { onAuthStateChanged, type User as FirebaseUser } from "firebase/auth";
 import { auth } from "../lib/firebase";
 import { signOut } from "../lib/auth";
-import { getUserOrgId, getUserProfile } from "../services/organizationService";
-import type { User } from "../types";
+import { getOrganization, getUserOrgId, getUserProfile } from "../services/organizationService";
+import type { Organization, User } from "../types";
 
 interface UseAuthResult {
   /** Raw Firebase Auth user (identity only), or `null` if signed out. */
   firebaseUser: FirebaseUser | null;
   /** Firestore profile for `firebaseUser` (organization, role, etc.), or `null` if signed out / not yet loaded. */
   user: User | null;
+  /** `user`'s Organization (name, settings, etc.), or `null` if signed out / not yet loaded. Used by Layout to show the org's own name in the header instead of generic branding alone. */
+  organization: Organization | null;
   /** True while auth state is resolving or the profile fetch is in flight. */
   loading: boolean;
   /** Set if the profile fetch or sign-out fails; cleared on the next successful auth change. */
@@ -31,6 +34,7 @@ interface UseAuthResult {
 export function useAuth(): UseAuthResult {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [user, setUser] = useState<User | null>(null);
+  const [organization, setOrganization] = useState<Organization | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
@@ -46,6 +50,7 @@ export function useAuth(): UseAuthResult {
       if (!fbUser) {
         console.log("[useAuth] No Firebase user — clearing profile, done.");
         setUser(null);
+        setOrganization(null);
         setLoading(false);
         return;
       }
@@ -98,6 +103,7 @@ export function useAuth(): UseAuthResult {
           await signOut();
           setFirebaseUser(null);
           setUser(null);
+          setOrganization(null);
           setError(new Error("Your account doesn't have access to this organization. Contact your administrator."));
           setLoading(false);
           return;
@@ -111,9 +117,24 @@ export function useAuth(): UseAuthResult {
         }
 
         setUser(profile);
+
+        // Non-fatal: the org doc is only used for display (Layout's
+        // header name) — a failure here shouldn't sign anyone out or
+        // block the rest of the app the way a failed profile fetch does.
+        if (orgId && profile) {
+          try {
+            setOrganization(await getOrganization(orgId));
+          } catch (orgErr) {
+            console.warn(`[useAuth] Failed to load organizations/${orgId} — header will fall back to generic branding.`, orgErr);
+            setOrganization(null);
+          }
+        } else {
+          setOrganization(null);
+        }
       } catch (err) {
         console.error("[useAuth] Failed while resolving org/profile:", err);
         setUser(null);
+        setOrganization(null);
         setError(err instanceof Error ? err : new Error("Failed to load user profile"));
       } finally {
         setLoading(false);
@@ -132,5 +153,5 @@ export function useAuth(): UseAuthResult {
     }
   }, []);
 
-  return { firebaseUser, user, loading, error, logout };
+  return { firebaseUser, user, organization, loading, error, logout };
 }

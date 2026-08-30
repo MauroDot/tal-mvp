@@ -10,7 +10,7 @@
  * profiles live nested under their org) — it's a flat, UID-keyed pointer
  * consulted first to resolve which org to look the profile up in.
  */
-import { collection, doc, getDoc, getDocs } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, serverTimestamp, updateDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { convertTimestamps } from "../lib/firestoreUtils";
 import type { Organization, User } from "../types";
@@ -25,6 +25,36 @@ export async function getOrganization(orgId: string): Promise<Organization | nul
     return null;
   }
   return convertTimestamps<Organization>({ id: snapshot.id, ...snapshot.data() });
+}
+
+/** Fields the org settings form collects. */
+export interface OrganizationEditFields {
+  name: string;
+  inspectionIntervalDays: number;
+}
+
+/**
+ * Updates an organization's name and inspection interval — admin-only
+ * per firestore.rules (`allow update: if hasRole(orgId, ['admin'])` on
+ * `organizations/{orgId}`; a narrow addition made specifically for this,
+ * see the rule's comment for why a direct rule rather than a Cloud
+ * Function). A direct client write, unlike the `users` subcollection —
+ * org settings carry no permission/role data, so there's no
+ * privilege-escalation concern to route around via the Admin SDK.
+ */
+export async function updateOrganization(orgId: string, fields: OrganizationEditFields): Promise<void> {
+  const name = fields.name.trim();
+  if (!name) {
+    throw new Error("Organization name is required.");
+  }
+  if (!Number.isFinite(fields.inspectionIntervalDays) || fields.inspectionIntervalDays <= 0) {
+    throw new Error("Inspection interval must be a positive number of days.");
+  }
+  await updateDoc(doc(db, "organizations", orgId), {
+    name,
+    settings: { inspectionIntervalDays: fields.inspectionIntervalDays },
+    updatedAt: serverTimestamp(),
+  });
 }
 
 /**

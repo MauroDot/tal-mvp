@@ -103,6 +103,11 @@ export interface Organization {
   timezone: string;
   /** Subscription/plan tier, used to gate features (e.g. "free", "pro", "enterprise"). */
   plan: string;
+  /** Org-level configuration, editable by admins (see admin/settings/page.tsx). */
+  settings?: {
+    /** Default recurrence, in days, for how often assets should be inspected (e.g. 7 for weekly). */
+    inspectionIntervalDays?: number;
+  };
   /** Whether the organization is active; false hides it and blocks logins. */
   isActive: boolean;
   /** When the organization record was created. */
