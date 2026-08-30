@@ -24,6 +24,7 @@ export default function Layout({ children }: LayoutProps) {
   // reject them (see useRequireRole for the actual gate).
   const canSeeFleetNav = user ? ROUTE_ROLES.fleet.includes(user.role) : false;
   const canSeeWorkOrdersNav = user ? ROUTE_ROLES.workOrders.includes(user.role) : false;
+  const canSeeTemplatesNav = user ? ROUTE_ROLES.templates.includes(user.role) : false;
 
   const handleLogout = async () => {
     try {
@@ -47,7 +48,7 @@ export default function Layout({ children }: LayoutProps) {
               </span>
             </Link>
 
-            {(canSeeFleetNav || canSeeWorkOrdersNav) && (
+            {(canSeeFleetNav || canSeeWorkOrdersNav || canSeeTemplatesNav) && (
               <nav className="hidden gap-4 sm:flex">
                 {canSeeFleetNav && (
                   <Link href="/fleet" className="text-sm font-medium text-gray-600 hover:text-blue-700">
@@ -57,6 +58,11 @@ export default function Layout({ children }: LayoutProps) {
                 {canSeeWorkOrdersNav && (
                   <Link href="/work-orders" className="text-sm font-medium text-gray-600 hover:text-blue-700">
                     Work Orders
+                  </Link>
+                )}
+                {canSeeTemplatesNav && (
+                  <Link href="/admin/templates" className="text-sm font-medium text-gray-600 hover:text-blue-700">
+                    Templates
                   </Link>
                 )}
               </nav>

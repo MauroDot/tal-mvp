@@ -92,11 +92,17 @@ export async function startInspection(
     throw new Error(`Inspection template ${templateId} not found in organization ${orgId}`);
   }
   const assetType = templateSnap.data().appliesTo as AssetType;
+  // Frozen at start, not looked up again later — templateId already
+  // points at one immutable version's document (see
+  // inspectionTemplateService), but templateVersion rides along for a
+  // human-readable record without needing to dereference templateId.
+  const templateVersion = templateSnap.data().version as number;
 
   const inspectionRef = doc(collection(db, "organizations", orgId, "inspections"));
   await setDoc(inspectionRef, {
     organizationId: orgId,
     templateId,
+    templateVersion,
     assetType,
     assetId,
     inspectorUserId: inspectorId,

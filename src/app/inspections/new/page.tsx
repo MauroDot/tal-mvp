@@ -13,10 +13,10 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Layout from "@/components/Layout";
 import { useAuth } from "@/hooks/useAuth";
+import { getActiveTemplate } from "@/services/inspectionTemplateService";
 import { getVehicle } from "@/services/vehicleService";
 import {
   completeInspection,
-  getInspectionTemplate,
   startInspection,
   submitDefect,
   uploadDefectPhoto,
@@ -24,17 +24,6 @@ import {
   type InspectionItemInput,
 } from "@/services/inspectionService";
 import type { InspectionTemplate, IssueSeverity, Vehicle } from "@/types";
-
-/** The demo daily inspection template — see scripts/setup-demo.ts. */
-const TEMPLATE_ID = "template-1";
-
-/**
- * Which checklist items show a photo control at all. Separate from
- * requiresPhoto (which would make a shown photo *mandatory* — see
- * allAnswered) — this is purely "does the control appear", hardcoded per
- * the current template's item ids the same way TEMPLATE_ID itself is.
- */
-const PHOTO_VISIBLE_ITEM_IDS = new Set(["tires", "lights", "emergency-light"]);
 
 const MAX_BODY_DAMAGE_PHOTOS = 3;
 const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png"];
@@ -96,16 +85,9 @@ function InspectionFormPage() {
       setLoadingData(true);
       setLoadError(null);
       try {
-        const [vehicleResult, templateResult] = await Promise.all([
-          getVehicle(currentUser.organizationId, currentVehicleId),
-          getInspectionTemplate(currentUser.organizationId, TEMPLATE_ID),
-        ]);
-
+        const vehicleResult = await getVehicle(currentUser.organizationId, currentVehicleId);
         if (!vehicleResult) {
           throw new Error("Vehicle not found.");
-        }
-        if (!templateResult) {
-          throw new Error("Inspection template not found.");
         }
         // Defense in depth against a stale link/bookmark — the vehicle
         // detail page already hides "Start Inspection" for a retired
@@ -115,10 +97,19 @@ function InspectionFormPage() {
           throw new Error("This vehicle is retired and can't have new inspections started.");
         }
 
+        // The active template for "vehicle" (see admin/templates —
+        // inspectionTemplateService.activateTemplate is what sets this),
+        // not a hardcoded id — an admin swapping the active template
+        // takes effect here immediately, with no code change needed.
+        const templateResult = await getActiveTemplate(currentUser.organizationId, "vehicle");
+        if (!templateResult) {
+          throw new Error("No active inspection template for vehicles — an admin needs to activate one first.");
+        }
+
         const newInspectionId = await startInspection(
           currentUser.organizationId,
           currentVehicleId,
-          TEMPLATE_ID,
+          templateResult.id,
           currentUser.id
         );
 
@@ -358,15 +349,21 @@ function InspectionFormPage() {
                       />
                     </div>
 
-                    {/* Photo control only on the items it's actually
-                        relevant to — not every item gets one. */}
-                    {PHOTO_VISIBLE_ITEM_IDS.has(item.id) && (
+                    {/* Photo control only on items the template flags
+                        requiresPhoto for — set per item in template
+                        management (admin/templates). Attaching one is
+                        still never mandatory to submit (see allAnswered);
+                        this only controls whether the control appears. */}
+                    {item.requiresPhoto && (
                       <div className="mt-3">
+                        {/* Not actually enforced at submit (see allAnswered)
+                            — requiresPhoto only decides whether this control
+                            shows at all, so it's always true in this branch. */}
                         <label
                           htmlFor={`photo-${item.id}`}
                           className="mb-1 block text-xs font-medium text-gray-500"
                         >
-                          Photo{item.requiresPhoto ? " (required)" : ""}
+                          Photo (required)
                         </label>
                         <input
                           id={`photo-${item.id}`}

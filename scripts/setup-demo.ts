@@ -1,9 +1,9 @@
 /**
- * Seeds a demo dataset into Firestore: one organization, three users (an
- * officer, a second officer, and a fleet manager — keyed by their real
- * Firebase Auth UIDs, so auth and Firestore data always match), a
- * ten-vehicle fleet with a realistic spread of statuses/inspections/
- * issues, and one inspection template.
+ * Seeds a demo dataset into Firestore: one organization, three or four
+ * users (an officer, a second officer, a fleet manager, and optionally
+ * an admin — keyed by their real Firebase Auth UIDs, so auth and
+ * Firestore data always match), a ten-vehicle fleet with a realistic
+ * spread of statuses/inspections/issues, and one inspection template.
  *
  * Idempotent: every write is `set(..., { merge: true })`, never `add()`,
  * so re-running this script updates the same demo docs in place instead
@@ -19,17 +19,20 @@
  * write is still "in" the script.
  *
  * Usage:
- *   npm run seed -- [--reset] <officerUid> <fleetManagerUid> <officer2Uid>
+ *   npm run seed -- [--reset] <officerUid> <fleetManagerUid> <officer2Uid> [adminUid]
  *
- * All three UIDs are required Firebase Auth UIDs for three distinct,
- * already-existing accounts (Firebase Console -> Authentication -> that
- * user's row). Each is looked up via Admin Auth before anything is
- * written (see `resolveSeedUsers`) — email and display name always come
- * from the real account, never a hardcoded persona, and the script
- * refuses to write anything if any lookup fails. Only the *role* each UID
- * gets is positional (officerUid/officer2Uid -> "officer", fleetManagerUid
- * -> "fleet_manager") — that's the one thing genuinely being chosen by
- * argument order, so double-check it before running.
+ * The first three UIDs are required Firebase Auth UIDs for three
+ * distinct, already-existing accounts (Firebase Console -> Authentication
+ * -> that user's row); adminUid is a fourth, optional one, seeded with
+ * role "admin" — omit it and the script behaves exactly as it did before
+ * this argument existed. Every UID given is looked up via Admin Auth
+ * before anything is written (see `resolveSeedUsers`) — email and display
+ * name always come from the real account, never a hardcoded persona, and
+ * the script refuses to write anything if any lookup fails. Only the
+ * *role* each UID gets is positional (officerUid/officer2Uid ->
+ * "officer", fleetManagerUid -> "fleet_manager", adminUid -> "admin") —
+ * that's the one thing genuinely being chosen by argument order, so
+ * double-check it before running.
  *
  * --reset deletes every document in the demo org's issues, inspections,
  * workOrders, maintenanceRecords, alerts, and auditLogs collections
@@ -80,24 +83,32 @@ function loadServiceAccount(): ServiceAccount {
   return JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_PATH, "utf-8"));
 }
 
-function getCliArgs(): { officerUid: string; fleetManagerUid: string; officer2Uid: string; reset: boolean } {
+function getCliArgs(): {
+  officerUid: string;
+  fleetManagerUid: string;
+  officer2Uid: string;
+  adminUid?: string;
+  reset: boolean;
+} {
   const args = process.argv.slice(2);
   const reset = args.includes("--reset");
-  const [officerUid, fleetManagerUid, officer2Uid] = args.filter((arg) => arg !== "--reset");
+  const [officerUid, fleetManagerUid, officer2Uid, adminUid] = args.filter((arg) => arg !== "--reset");
 
   if (!officerUid || !fleetManagerUid || !officer2Uid) {
     console.error(
-      "Usage: npm run seed -- [--reset] <officerUid> <fleetManagerUid> <officer2Uid>\n\n" +
-        "All three are required Firebase Auth UIDs (Firebase Console -> Authentication\n" +
-        "-> that user's row) for three distinct, already-existing accounts. Each one is\n" +
-        "looked up via Admin Auth before anything is written — see resolveSeedUsers.\n\n" +
+      "Usage: npm run seed -- [--reset] <officerUid> <fleetManagerUid> <officer2Uid> [adminUid]\n\n" +
+        "The first three are required Firebase Auth UIDs (Firebase Console -> Authentication\n" +
+        "-> that user's row) for three distinct, already-existing accounts. adminUid is a\n" +
+        "fourth, optional one, seeded with role \"admin\" — omit it and the other three still\n" +
+        "work exactly as before. Every UID given is looked up via Admin Auth before anything\n" +
+        "is written — see resolveSeedUsers.\n\n" +
         "--reset deletes the demo org's issues/inspections/workOrders/maintenanceRecords/\n" +
         "alerts/auditLogs first (org/users/vehicles/templates are left intact) — see\n" +
         "runReset. Prints what it will delete and requires typing \"yes\" to confirm."
     );
     process.exit(1);
   }
-  return { officerUid, fleetManagerUid, officer2Uid, reset };
+  return { officerUid, fleetManagerUid, officer2Uid, adminUid, reset };
 }
 
 /** Turns "k.ramirez" (from k.ramirez@tulsaexample.gov) into "K Ramirez". */
@@ -141,20 +152,23 @@ interface ResolvedSeedUser {
 }
 
 /**
- * Looks up all three UIDs via Admin Auth, prints "UID -> email" for each,
- * and refuses to write anything to Firestore if any lookup fails (wrong
- * UID, deleted account, or an account with no email) — the whole reason
- * the previous run seeded k.ramirez@tulsaexample.gov's real account as
- * "Alex Rivera / fleet_manager" is that nothing ever verified a UID
- * actually belonged to the identity it was about to be labeled with.
- * Role assignment stays positional (officerUid/officer2Uid -> "officer",
- * fleetManagerUid -> "fleet_manager") — that's the one thing the caller
- * is genuinely choosing; name and email always come from the real account.
+ * Looks up every given UID via Admin Auth, prints "UID -> email" for
+ * each, and refuses to write anything to Firestore if any lookup fails
+ * (wrong UID, deleted account, or an account with no email) — the whole
+ * reason the previous run seeded k.ramirez@tulsaexample.gov's real
+ * account as "Alex Rivera / fleet_manager" is that nothing ever verified
+ * a UID actually belonged to the identity it was about to be labeled
+ * with. Role assignment stays positional (officerUid/officer2Uid ->
+ * "officer", fleetManagerUid -> "fleet_manager", adminUid -> "admin") —
+ * that's the one thing the caller is genuinely choosing; name and email
+ * always come from the real account. adminUid is optional — when it's
+ * omitted, only the required three are looked up and seeded.
  */
 async function resolveSeedUsers(uids: {
   officerUid: string;
   fleetManagerUid: string;
   officer2Uid: string;
+  adminUid?: string;
 }): Promise<ResolvedSeedUser[]> {
   const auth = getAuth();
   const requests: Array<{ label: string; uid: string; role: UserRole }> = [
@@ -162,6 +176,9 @@ async function resolveSeedUsers(uids: {
     { label: "fleetManagerUid", uid: uids.fleetManagerUid, role: "fleet_manager" },
     { label: "officer2Uid", uid: uids.officer2Uid, role: "officer" },
   ];
+  if (uids.adminUid) {
+    requests.push({ label: "adminUid", uid: uids.adminUid, role: "admin" });
+  }
 
   console.log("Verifying UIDs against Firebase Auth:");
   const results = await Promise.allSettled(requests.map((r) => auth.getUser(r.uid)));
@@ -503,13 +520,13 @@ const FLEET: SeedVehicleSpec[] = [
 ];
 
 async function main() {
-  const { officerUid, fleetManagerUid, officer2Uid, reset } = getCliArgs();
+  const { officerUid, fleetManagerUid, officer2Uid, adminUid, reset } = getCliArgs();
   initializeApp({ credential: cert(loadServiceAccount()) });
   const db = getFirestore();
 
   // Verify every UID against real Auth accounts *before* doing anything
   // else (including --reset's deletions) — see resolveSeedUsers for why.
-  const resolvedUsers = await resolveSeedUsers({ officerUid, fleetManagerUid, officer2Uid });
+  const resolvedUsers = await resolveSeedUsers({ officerUid, fleetManagerUid, officer2Uid, adminUid });
 
   if (reset) {
     await runReset(db);
@@ -607,6 +624,7 @@ async function main() {
         {
           organizationId: ORG_ID,
           templateId: TEMPLATE_ID,
+          templateVersion: 1,
           assetType: "vehicle",
           assetId: spec.id,
           inspectorUserId: assignedUserId ?? officerUid,
@@ -651,6 +669,11 @@ async function main() {
       appliesTo: "vehicle",
       name: "Daily Vehicle Inspection",
       version: 1,
+      // Self-referential for a version-1 document — see
+      // InspectionTemplate.familyId in src/types. Re-running this
+      // (idempotent, merge:true) backfills it onto an existing
+      // pre-versioning deployment of this doc.
+      familyId: TEMPLATE_ID,
       isActive: true,
       // Daily template -> daily recurrence, so onInspectionComplete's
       // "next inspection due" Alert has a recurrenceDays to work from.

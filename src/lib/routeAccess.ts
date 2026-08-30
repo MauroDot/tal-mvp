@@ -10,7 +10,12 @@
  */
 import type { UserRole } from "@/types";
 
-export const ROUTE_ROLES: { fleet: UserRole[]; workOrders: UserRole[]; vehicleManagement: UserRole[] } = {
+export const ROUTE_ROLES: {
+  fleet: UserRole[];
+  workOrders: UserRole[];
+  vehicleManagement: UserRole[];
+  templates: UserRole[];
+} = {
   fleet: ["admin", "fleet_manager", "supervisor"],
   // Same role set as fleet today (and matches the workOrders/issues-update
   // Firestore write rules), but kept as its own entry rather than reusing
@@ -24,4 +29,8 @@ export const ROUTE_ROLES: { fleet: UserRole[]; workOrders: UserRole[]; vehicleMa
   // the management controls (Edit link, Reassign, Retire, manual status
   // override) shown inline on /fleet and the vehicle detail page.
   vehicleManagement: ["admin", "fleet_manager"],
+  // Matches the inspectionTemplates write rule in firestore.rules exactly
+  // (admin only — not even fleet_manager). Gates /admin/templates and its
+  // new/edit subroutes.
+  templates: ["admin"],
 };

@@ -80,6 +80,14 @@ async function seedFixtures(): Promise<void> {
       organizationId: ORG_A,
       isActive: true,
     });
+    await setDoc(doc(db, "organizations", ORG_A, "users", "admin-a"), {
+      email: "admin-a@example.com",
+      firstName: "Admin",
+      lastName: "A",
+      role: "admin",
+      organizationId: ORG_A,
+      isActive: true,
+    });
     await setDoc(doc(db, "organizations", ORG_B, "users", "officer-b"), {
       email: "officer-b@example.com",
       firstName: "Officer",
@@ -91,6 +99,7 @@ async function seedFixtures(): Promise<void> {
 
     await setDoc(doc(db, "userOrgs", "officer-a"), { organizationId: ORG_A, email: "officer-a@example.com" });
     await setDoc(doc(db, "userOrgs", "manager-a"), { organizationId: ORG_A, email: "manager-a@example.com" });
+    await setDoc(doc(db, "userOrgs", "admin-a"), { organizationId: ORG_A, email: "admin-a@example.com" });
     await setDoc(doc(db, "userOrgs", "officer-b"), { organizationId: ORG_B, email: "officer-b@example.com" });
 
     await setDoc(doc(db, "organizations", ORG_A, "vehicles", "vehicle-a1"), {
@@ -102,6 +111,16 @@ async function seedFixtures(): Promise<void> {
       unitNumber: "B1",
       status: "ready",
       organizationId: ORG_B,
+    });
+
+    await setDoc(doc(db, "organizations", ORG_A, "inspectionTemplates", "template-a1"), {
+      organizationId: ORG_A,
+      name: "Daily Vehicle Inspection",
+      appliesTo: "vehicle",
+      items: [],
+      version: 1,
+      familyId: "template-a1",
+      isActive: true,
     });
 
     await setDoc(doc(db, "organizations", ORG_A, "auditLogs", "log-1"), {
@@ -174,6 +193,66 @@ describe("vehicles: read for any member, write for admin/fleet_manager", () => {
   it("denies even a fleet_manager deleting a vehicle — no delete path is offered; history must survive", async () => {
     const managerA = ctxFor("manager-a");
     await assertFails(deleteDoc(doc(managerA, "organizations", ORG_A, "vehicles", "vehicle-a1")));
+  });
+});
+
+describe("inspectionTemplates: read for any member, write for admin only (not even fleet_manager)", () => {
+  it("allows an officer to read a template", async () => {
+    const officerA = ctxFor("officer-a");
+    await assertSucceeds(getDoc(doc(officerA, "organizations", ORG_A, "inspectionTemplates", "template-a1")));
+  });
+
+  it("denies an officer creating a template", async () => {
+    const officerA = ctxFor("officer-a");
+    await assertFails(
+      setDoc(doc(officerA, "organizations", ORG_A, "inspectionTemplates", "template-a2"), {
+        name: "Rogue Template",
+        appliesTo: "vehicle",
+        items: [],
+        version: 1,
+        familyId: "template-a2",
+        isActive: false,
+      })
+    );
+  });
+
+  it("denies a fleet_manager creating a template — this collection is admin-only, unlike vehicles/workOrders", async () => {
+    const managerA = ctxFor("manager-a");
+    await assertFails(
+      setDoc(doc(managerA, "organizations", ORG_A, "inspectionTemplates", "template-a2"), {
+        name: "Manager's Template",
+        appliesTo: "vehicle",
+        items: [],
+        version: 1,
+        familyId: "template-a2",
+        isActive: false,
+      })
+    );
+  });
+
+  it("allows an admin to create a template", async () => {
+    const adminA = ctxFor("admin-a");
+    await assertSucceeds(
+      setDoc(doc(adminA, "organizations", ORG_A, "inspectionTemplates", "template-a2"), {
+        name: "Admin's Template",
+        appliesTo: "vehicle",
+        items: [],
+        version: 1,
+        familyId: "template-a2",
+        isActive: false,
+      })
+    );
+  });
+
+  it("allows an admin to update a template (e.g. activate/deactivate)", async () => {
+    const adminA = ctxFor("admin-a");
+    await assertSucceeds(
+      setDoc(
+        doc(adminA, "organizations", ORG_A, "inspectionTemplates", "template-a1"),
+        { isActive: false },
+        { merge: true }
+      )
+    );
   });
 });
 

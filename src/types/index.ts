@@ -321,8 +321,27 @@ export interface InspectionTemplate {
   items: TemplateItem[];
   /** Suggested recurrence in days (e.g. 1 for daily, 30 for monthly); undefined if ad hoc. */
   recurrenceDays?: number;
-  /** Whether this template is currently offered when starting a new inspection. */
+  /** Whether this template is currently offered when starting a new inspection. At most one template per `appliesTo` should be active at once (enforced by inspectionTemplateService.activateTemplate, not by Firestore rules). */
   isActive: boolean;
+  /**
+   * Version number within this template's lineage, starting at 1.
+   * Editing a template (see inspectionTemplateService.updateTemplate)
+   * never changes an existing version's document — it creates a new one
+   * with `version` incremented, so a completed Inspection's
+   * `templateId`/`templateVersion` keep resolving to the exact content
+   * that was in effect when it ran, forever.
+   */
+  version: number;
+  /**
+   * Stable id shared by every version of one template's lineage — set to
+   * the version-1 document's own id and copied forward on every
+   * subsequent version. Groups `organizations/{orgId}/inspectionTemplates`
+   * documents that are "the same template" across edits, since each edit
+   * is a new document with a new id.
+   */
+  familyId: string;
+  /** The version this one was created from, if it was created by editing an earlier version rather than from scratch. */
+  previousVersionId?: string;
   /** When the template was created. */
   createdAt: string;
   /** When the template was last updated. */
@@ -368,8 +387,10 @@ export interface Inspection {
   id: string;
   /** Organization this inspection belongs to. */
   organizationId: string;
-  /** Template used to generate this inspection's checklist. */
+  /** Template used to generate this inspection's checklist — a specific version's document id, frozen at `startInspection` time (see inspectionTemplateService for why editing a template never changes this document out from under an existing Inspection). */
   templateId: string;
+  /** The `InspectionTemplate.version` in effect at `templateId` when this inspection started — recorded alongside `templateId` for a human-readable audit trail (the id alone is already sufficient to resolve the exact content). */
+  templateVersion: number;
   /** Which asset type was inspected. See {@link AssetType}. */
   assetType: AssetType;
   /** ID of the Vehicle or Equipment inspected (matches `assetType`). */
