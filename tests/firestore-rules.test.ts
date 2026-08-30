@@ -17,7 +17,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from "@firebase/rules-unit-testing";
-import { doc, getDoc, setDoc, updateDoc, type Firestore } from "firebase/firestore";
+import { deleteDoc, doc, getDoc, setDoc, updateDoc, type Firestore } from "firebase/firestore";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const PROJECT_ID = "demo-fleetready-rules-test";
@@ -247,8 +247,8 @@ describe("inspections: update by the original inspector, only while incomplete",
   });
 });
 
-describe("issues: create for any member, update for reporter or admin/fleet_manager/supervisor", () => {
-  it("allows any org member to create an issue", async () => {
+describe("issues: create only as yourself, update for reporter or admin/fleet_manager/supervisor", () => {
+  it("allows an org member to create an issue self-attributed as reportedByUserId", async () => {
     const officerA = ctxFor("officer-a");
     await assertSucceeds(
       setDoc(doc(officerA, "organizations", ORG_A, "issues", "issue-1"), {
@@ -259,6 +259,22 @@ describe("issues: create for any member, update for reporter or admin/fleet_mana
         severity: "low",
         status: "open",
         reportedByUserId: "officer-a",
+        reportedAt: new Date().toISOString(),
+      })
+    );
+  });
+
+  it("denies creating an issue attributed to someone else — filing under another user's name would defeat the audit trail", async () => {
+    const officerA = ctxFor("officer-a");
+    await assertFails(
+      setDoc(doc(officerA, "organizations", ORG_A, "issues", "issue-1b"), {
+        organizationId: ORG_A,
+        assetType: "vehicle",
+        assetId: "vehicle-a1",
+        title: "Test issue",
+        severity: "low",
+        status: "open",
+        reportedByUserId: "manager-a", // not the requester
         reportedAt: new Date().toISOString(),
       })
     );
@@ -365,8 +381,8 @@ describe("maintenanceRecords: read for any member, write for admin/fleet_manager
   });
 });
 
-describe("auditLogs: client writes denied entirely, read gated to management roles", () => {
-  it("denies an officer writing an auditLog", async () => {
+describe("auditLogs: create limited to admin/fleet_manager (manual override path), update/delete denied entirely, read gated to management roles", () => {
+  it("denies an officer creating an auditLog", async () => {
     const officerA = ctxFor("officer-a");
     await assertFails(
       setDoc(doc(officerA, "organizations", ORG_A, "auditLogs", "log-hack"), {
@@ -380,15 +396,41 @@ describe("auditLogs: client writes denied entirely, read gated to management rol
     );
   });
 
-  it("denies even a fleet_manager writing an auditLog — Admin SDK (Cloud Functions) only, not role-gated", async () => {
+  it("allows a fleet_manager to create an auditLog — the manual vehicle-status-override path", async () => {
     const managerA = ctxFor("manager-a");
-    await assertFails(
-      setDoc(doc(managerA, "organizations", ORG_A, "auditLogs", "log-hack-2"), {
+    await assertSucceeds(
+      setDoc(doc(managerA, "organizations", ORG_A, "auditLogs", "log-override"), {
         organizationId: ORG_A,
         action: "vehicle_status_changed",
+        entityType: "vehicle",
+        entityId: "vehicle-a1",
+        performedBy: "manager-a",
+        metadata: {
+          previousStatus: "attention",
+          newStatus: "out_of_service",
+          rule: "manual_override",
+          triggeredBy: "manual_override",
+          triggeredByEntityId: "vehicle-a1",
+        },
         timestamp: new Date().toISOString(),
       })
     );
+  });
+
+  it("denies a fleet_manager updating an existing auditLog — append-only even for allowed roles", async () => {
+    const managerA = ctxFor("manager-a");
+    await assertFails(
+      setDoc(
+        doc(managerA, "organizations", ORG_A, "auditLogs", "log-1"),
+        { performedBy: "manager-a" },
+        { merge: true }
+      )
+    );
+  });
+
+  it("denies a fleet_manager deleting an existing auditLog", async () => {
+    const managerA = ctxFor("manager-a");
+    await assertFails(deleteDoc(doc(managerA, "organizations", ORG_A, "auditLogs", "log-1")));
   });
 
   it("denies an officer reading auditLogs", async () => {

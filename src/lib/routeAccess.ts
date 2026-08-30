@@ -10,6 +10,12 @@
  */
 import type { UserRole } from "@/types";
 
-export const ROUTE_ROLES: { fleet: UserRole[] } = {
+export const ROUTE_ROLES: { fleet: UserRole[]; workOrders: UserRole[] } = {
   fleet: ["admin", "fleet_manager", "supervisor"],
+  // Same role set as fleet today (and matches the workOrders/issues-update
+  // Firestore write rules), but kept as its own entry rather than reusing
+  // `fleet` — these are conceptually different pages that could diverge
+  // later (e.g. equipment_manager gaining work order access without
+  // gaining /fleet access).
+  workOrders: ["admin", "fleet_manager", "supervisor"],
 };

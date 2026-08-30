@@ -20,9 +20,10 @@ export default function Layout({ children }: LayoutProps) {
     ? `${user.firstName} ${user.lastName}`
     : (firebaseUser?.email ?? (loading ? "Loading…" : null));
 
-  // Mirrors ROUTE_ROLES.fleet — an officer shouldn't see a link that will
-  // just reject them (see useRequireRole for the actual gate).
+  // Mirrors ROUTE_ROLES — an officer shouldn't see a link that will just
+  // reject them (see useRequireRole for the actual gate).
   const canSeeFleetNav = user ? ROUTE_ROLES.fleet.includes(user.role) : false;
+  const canSeeWorkOrdersNav = user ? ROUTE_ROLES.workOrders.includes(user.role) : false;
 
   const handleLogout = async () => {
     try {
@@ -46,14 +47,18 @@ export default function Layout({ children }: LayoutProps) {
               </span>
             </Link>
 
-            {canSeeFleetNav && (
-              <nav className="hidden sm:block">
-                <Link
-                  href="/fleet"
-                  className="text-sm font-medium text-gray-600 hover:text-blue-700"
-                >
-                  Fleet
-                </Link>
+            {(canSeeFleetNav || canSeeWorkOrdersNav) && (
+              <nav className="hidden gap-4 sm:flex">
+                {canSeeFleetNav && (
+                  <Link href="/fleet" className="text-sm font-medium text-gray-600 hover:text-blue-700">
+                    Fleet
+                  </Link>
+                )}
+                {canSeeWorkOrdersNav && (
+                  <Link href="/work-orders" className="text-sm font-medium text-gray-600 hover:text-blue-700">
+                    Work Orders
+                  </Link>
+                )}
               </nav>
             )}
           </div>

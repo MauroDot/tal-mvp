@@ -2,8 +2,8 @@
 
 /**
  * Inspection form: starts an inspection for the vehicle given in
- * ?vehicleId=..., renders its template's checklist, and completes the
- * inspection on submit.
+ * ?vehicleId=..., renders its template's checklist plus an optional
+ * "Body Damage" section, and completes the inspection on submit.
  *
  * Wrapped in <Suspense> because `useSearchParams` requires it for static
  * builds (see Next.js docs on useSearchParams + prerendering) — otherwise
@@ -18,13 +18,27 @@ import {
   completeInspection,
   getInspectionTemplate,
   startInspection,
+  submitDefect,
+  uploadDefectPhoto,
   uploadInspectionPhoto,
   type InspectionItemInput,
 } from "@/services/inspectionService";
-import type { InspectionTemplate, Vehicle } from "@/types";
+import type { InspectionTemplate, IssueSeverity, Vehicle } from "@/types";
 
 /** The demo daily inspection template — see scripts/setup-demo.ts. */
 const TEMPLATE_ID = "template-1";
+
+/**
+ * Which checklist items show a photo control at all. Separate from
+ * requiresPhoto (which would make a shown photo *mandatory* — see
+ * allAnswered) — this is purely "does the control appear", hardcoded per
+ * the current template's item ids the same way TEMPLATE_ID itself is.
+ */
+const PHOTO_VISIBLE_ITEM_IDS = new Set(["tires", "lights", "emergency-light"]);
+
+const MAX_BODY_DAMAGE_PHOTOS = 3;
+const ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png"];
+const SEVERITY_OPTIONS: IssueSeverity[] = ["low", "medium", "high", "critical"];
 
 interface ItemAnswer {
   passed: boolean | null;
@@ -54,6 +68,14 @@ function InspectionFormPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Body Damage: entirely optional, separate from the checklist — see
+  // handleSubmit's hasBodyDamage check and allAnswered below.
+  const [bodyDamageDescription, setBodyDamageDescription] = useState("");
+  const [bodyDamageSeverity, setBodyDamageSeverity] = useState<IssueSeverity>("low");
+  const [bodyDamagePhotos, setBodyDamagePhotos] = useState<File[]>([]);
+  const [bodyDamagePhotoPreviews, setBodyDamagePhotoPreviews] = useState<string[]>([]);
+  const [bodyDamagePhotoError, setBodyDamagePhotoError] = useState<string | null>(null);
 
   // Redirect once auth state has resolved and no one is signed in.
   useEffect(() => {
@@ -136,23 +158,54 @@ function InspectionFormPage() {
     }
   }
 
-  const allAnswered =
-    template?.items.every((item) => {
-      const answer = answers[item.id];
-      if (!answer || answer.passed === null) {
-        return false;
-      }
-      if (item.requiresPhoto && !answer.photoId) {
-        return false;
-      }
-      if (item.requiresNote && !answer.textValue.trim()) {
-        return false;
-      }
-      return true;
-    }) ?? false;
+  // Revoke Body Damage preview object URLs whenever they're replaced or
+  // the page unmounts (same pattern as report-defect/page.tsx).
+  useEffect(() => {
+    return () => {
+      bodyDamagePhotoPreviews.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [bodyDamagePhotoPreviews]);
+
+  function handleBodyDamagePhotosChange(fileList: FileList | null) {
+    if (!fileList) {
+      return;
+    }
+    const files = Array.from(fileList);
+    const valid = files.filter((file) => ALLOWED_PHOTO_TYPES.includes(file.type));
+    const rejectedCount = files.length - valid.length;
+    const kept = valid.slice(0, MAX_BODY_DAMAGE_PHOTOS);
+
+    bodyDamagePhotoPreviews.forEach((url) => URL.revokeObjectURL(url));
+    setBodyDamagePhotos(kept);
+    setBodyDamagePhotoPreviews(kept.map((file) => URL.createObjectURL(file)));
+
+    if (rejectedCount > 0) {
+      setBodyDamagePhotoError(
+        `${rejectedCount} file${rejectedCount === 1 ? "" : "s"} skipped — only .jpg/.png are allowed.`
+      );
+    } else if (valid.length > MAX_BODY_DAMAGE_PHOTOS) {
+      setBodyDamagePhotoError(`Only the first ${MAX_BODY_DAMAGE_PHOTOS} photos were kept.`);
+    } else {
+      setBodyDamagePhotoError(null);
+    }
+  }
+
+  function removeBodyDamagePhoto(index: number) {
+    URL.revokeObjectURL(bodyDamagePhotoPreviews[index]);
+    setBodyDamagePhotos((prev) => prev.filter((_, i) => i !== index));
+    setBodyDamagePhotoPreviews((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  // Every item just needs a pass/fail answer. requiresPhoto/requiresNote
+  // stay on TemplateItem and are read nowhere in this gate on purpose —
+  // notes and photos are never required for submission, full stop. The
+  // fields themselves are kept in the schema (see src/types) for when a
+  // department wants mandatory photo evidence on a specific item later;
+  // wiring that back in is a deliberate future change, not an oversight.
+  const allAnswered = template?.items.every((item) => answers[item.id]?.passed !== null) ?? false;
 
   async function handleSubmit() {
-    if (!user || !inspectionId || !template) {
+    if (!user || !inspectionId || !template || !vehicleId) {
       return;
     }
     setSubmitting(true);
@@ -170,6 +223,30 @@ function InspectionFormPage() {
       });
 
       await completeInspection(user.organizationId, inspectionId, items);
+
+      // Body Damage is optional and separate from the checklist result —
+      // only create an Issue if the officer actually reported something.
+      const bodyDamageDescriptionTrimmed = bodyDamageDescription.trim();
+      const hasBodyDamage = bodyDamageDescriptionTrimmed.length > 0 || bodyDamagePhotos.length > 0;
+      if (hasBodyDamage) {
+        const bodyDamagePhotoIds: string[] = [];
+        for (const file of bodyDamagePhotos) {
+          bodyDamagePhotoIds.push(await uploadDefectPhoto(user.organizationId, file));
+        }
+        // Same path report-defect/page.tsx uses: submitDefect creates the
+        // Issue with reportedByUserId set to the officer's own id, which
+        // is what the Firestore issues create rule requires.
+        await submitDefect(
+          user.organizationId,
+          vehicleId,
+          user.id,
+          "Body Damage",
+          bodyDamageDescriptionTrimmed,
+          bodyDamageSeverity,
+          bodyDamagePhotoIds
+        );
+      }
+
       router.push("/dashboard");
     } catch (err) {
       setSubmitting(false);
@@ -255,32 +332,34 @@ function InspectionFormPage() {
                       </div>
                     </div>
 
-                    {item.requiresNote && (
-                      <div className="mt-3">
-                        <label
-                          htmlFor={`note-${item.id}`}
-                          className="mb-1 block text-xs font-medium text-gray-500"
-                        >
-                          Note (required)
-                        </label>
-                        <textarea
-                          id={`note-${item.id}`}
-                          value={answer.textValue}
-                          onChange={(event) => setAnswer(item.id, { textValue: event.target.value })}
-                          rows={2}
-                          className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          placeholder="Add a note…"
-                        />
-                      </div>
-                    )}
+                    {/* Notes are available on every item — always optional
+                        (see allAnswered above). */}
+                    <div className="mt-3">
+                      <label
+                        htmlFor={`note-${item.id}`}
+                        className="mb-1 block text-xs font-medium text-gray-500"
+                      >
+                        Note{item.requiresNote ? " (required)" : ""}
+                      </label>
+                      <textarea
+                        id={`note-${item.id}`}
+                        value={answer.textValue}
+                        onChange={(event) => setAnswer(item.id, { textValue: event.target.value })}
+                        rows={2}
+                        className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="Add a note…"
+                      />
+                    </div>
 
-                    {item.requiresPhoto && (
+                    {/* Photo control only on the items it's actually
+                        relevant to — not every item gets one. */}
+                    {PHOTO_VISIBLE_ITEM_IDS.has(item.id) && (
                       <div className="mt-3">
                         <label
                           htmlFor={`photo-${item.id}`}
                           className="mb-1 block text-xs font-medium text-gray-500"
                         >
-                          Photo (required)
+                          Photo{item.requiresPhoto ? " (required)" : ""}
                         </label>
                         <input
                           id={`photo-${item.id}`}
@@ -299,6 +378,92 @@ function InspectionFormPage() {
                   </div>
                 );
               })}
+          </div>
+
+          {/* Body Damage — optional, separate from the checklist. Filling
+              it in creates an Issue on submit via the same submitDefect
+              path report-defect/page.tsx uses; leaving it blank creates
+              nothing and doesn't affect the inspection result. */}
+          <div className="mt-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-900">Body Damage</h2>
+            <p className="mt-0.5 text-xs text-gray-500">
+              Optional — only fill this in if there&apos;s damage to report.
+            </p>
+
+            <div className="mt-3">
+              <label
+                htmlFor="body-damage-description"
+                className="mb-1 block text-xs font-medium text-gray-500"
+              >
+                Description
+              </label>
+              <textarea
+                id="body-damage-description"
+                value={bodyDamageDescription}
+                onChange={(event) => setBodyDamageDescription(event.target.value)}
+                rows={3}
+                className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Describe any body damage…"
+              />
+            </div>
+
+            <div className="mt-3">
+              <label
+                htmlFor="body-damage-severity"
+                className="mb-1 block text-xs font-medium text-gray-500"
+              >
+                Severity
+              </label>
+              <select
+                id="body-damage-severity"
+                value={bodyDamageSeverity}
+                onChange={(event) => setBodyDamageSeverity(event.target.value as IssueSeverity)}
+                className="block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {SEVERITY_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option.charAt(0).toUpperCase() + option.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mt-3">
+              <label htmlFor="body-damage-photos" className="mb-1 block text-xs font-medium text-gray-500">
+                Photos (optional, up to {MAX_BODY_DAMAGE_PHOTOS})
+              </label>
+              <input
+                id="body-damage-photos"
+                type="file"
+                accept="image/jpeg,image/png"
+                multiple
+                onChange={(event) => handleBodyDamagePhotosChange(event.target.files)}
+                className="block w-full text-sm text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
+              />
+              {bodyDamagePhotoError && <p className="mt-1 text-xs text-red-600">{bodyDamagePhotoError}</p>}
+
+              {bodyDamagePhotoPreviews.length > 0 && (
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  {bodyDamagePhotoPreviews.map((url, index) => (
+                    <div
+                      key={url}
+                      className="group relative aspect-square overflow-hidden rounded-md border border-gray-200"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview, not an optimizable remote asset */}
+                      <img src={url} alt={`Body damage photo ${index + 1}`} className="h-full w-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => removeBodyDamagePhoto(index)}
+                        aria-label={`Remove photo ${index + 1}`}
+                        className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-xs font-bold leading-none text-white hover:bg-black/80"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <button

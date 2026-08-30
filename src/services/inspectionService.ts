@@ -6,6 +6,7 @@
  *   organizations/{orgId}/issues/{issueId}                   -> Issue
  * Storage:
  *   organizations/{orgId}/inspections/{inspectionId}/photos/{photoId}
+ *   organizations/{orgId}/defect-photos/{photoId}
  *
  * `Inspection.assetType` and `Issue.assetType` (see `src/types`) aren't
  * passed in by callers here — they're resolved server-side instead of
@@ -22,11 +23,11 @@ import {
   setDoc,
   updateDoc,
 } from "firebase/firestore";
-import { ref, uploadBytes } from "firebase/storage";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { v4 as uuidv4 } from "uuid";
 import { db, storage } from "../lib/firebase";
 import { convertTimestamps, stripUndefined } from "../lib/firestoreUtils";
-import type { AssetType, Inspection, InspectionItemResult, InspectionTemplate, IssueSeverity } from "../types";
+import type { AssetType, Inspection, InspectionItemResult, InspectionTemplate, Issue, IssueSeverity } from "../types";
 
 /**
  * Shape of an inspection item response as supplied by the caller of
@@ -167,19 +168,20 @@ export async function completeInspection(
 }
 
 /**
- * Uploads a photo to Firebase Storage under `${storagePathPrefix}/{photoId}`
- * and returns the generated `photoId` (a UUID, preserving the original
- * file's extension when it has one). Shared by `uploadInspectionPhoto` and
- * `uploadDefectPhoto`, which differ only in which folder they upload into.
+ * Uploads a photo to Firebase Storage at exactly `${storagePathPrefix}/{photoId}`
+ * (no extension — Storage infers content-type from the File's own `.type`,
+ * not the object name) and returns the generated `photoId`. Deliberately
+ * NOT extension-suffixed: a `photoId` stored in Firestore has to be enough
+ * on its own to reconstruct this exact path later (see
+ * `getDefectPhotoUrl`) — an extension baked into the path would make that
+ * impossible without guessing or listing the bucket. Shared by
+ * `uploadInspectionPhoto` and `uploadDefectPhoto`, which differ only in
+ * which folder they upload into.
  */
 async function uploadPhoto(storagePathPrefix: string, file: File): Promise<string> {
   const photoId = uuidv4();
-  const dotIndex = file.name.lastIndexOf(".");
-  const extension = dotIndex >= 0 ? file.name.slice(dotIndex) : "";
-
-  const photoRef = ref(storage, `${storagePathPrefix}/${photoId}${extension}`);
+  const photoRef = ref(storage, `${storagePathPrefix}/${photoId}`);
   await uploadBytes(photoRef, file);
-
   return photoId;
 }
 
@@ -206,6 +208,27 @@ export async function uploadInspectionPhoto(
  */
 export async function uploadDefectPhoto(orgId: string, file: File): Promise<string> {
   return uploadPhoto(`organizations/${orgId}/defect-photos`, file);
+}
+
+/**
+ * Resolves a photoId previously returned by `uploadDefectPhoto` to a
+ * downloadable URL, for displaying an Issue's photos (e.g. on the work
+ * order detail page).
+ */
+export async function getDefectPhotoUrl(orgId: string, photoId: string): Promise<string> {
+  return getDownloadURL(ref(storage, `organizations/${orgId}/defect-photos/${photoId}`));
+}
+
+/**
+ * Fetches a single Issue by ID from `organizations/{orgId}/issues/{issueId}`.
+ * Returns `null` if no such document exists.
+ */
+export async function getIssue(orgId: string, issueId: string): Promise<Issue | null> {
+  const snapshot = await getDoc(doc(db, "organizations", orgId, "issues", issueId));
+  if (!snapshot.exists()) {
+    return null;
+  }
+  return convertTimestamps<Issue>({ id: snapshot.id, organizationId: orgId, ...snapshot.data() });
 }
 
 /**

@@ -23,13 +23,16 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
+  Timestamp,
   updateDoc,
   where,
+  writeBatch,
   type QueryConstraint,
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import { convertTimestamps } from "../lib/firestoreUtils";
-import type { AssetStatus, Inspection, Issue, MaintenanceRecord, Vehicle } from "../types";
+import { convertTimestamps, stripUndefined } from "../lib/firestoreUtils";
+import type { AssetStatus, AssetType, Inspection, Issue, MaintenanceRecord, Vehicle } from "../types";
 
 /** Optional filters accepted by {@link listVehicles}. */
 export interface VehicleFilter {
@@ -175,4 +178,101 @@ export async function getVehicleMaintenanceHistory(
   );
   const snapshot = await getDocs(q);
   return snapshot.docs.map((d) => convertTimestamps<MaintenanceRecord>({ id: d.id, ...d.data() }));
+}
+
+/** Fields the caller supplies when logging a new maintenance record; the rest are server-assigned. */
+export interface NewMaintenanceRecord {
+  assetType: AssetType;
+  assetId: string;
+  maintenanceType: string;
+  description?: string;
+  performedBy?: string;
+  cost?: number;
+  meterReadingAtService?: number;
+  /** ISO date string. Stored as a Firestore Timestamp, not a raw string —
+   * getVehicleMaintenanceHistory's `orderBy("performedAt")` needs every
+   * document's value to be the same type to sort consistently. */
+  performedAt: string;
+}
+
+/**
+ * Logs a new maintenance record under `organizations/{orgId}/maintenanceRecords`.
+ * Returns the new record's ID.
+ */
+export async function createMaintenanceRecord(orgId: string, record: NewMaintenanceRecord): Promise<string> {
+  const ref = doc(collection(db, "organizations", orgId, "maintenanceRecords"));
+  await setDoc(
+    ref,
+    stripUndefined({
+      organizationId: orgId,
+      assetType: record.assetType,
+      assetId: record.assetId,
+      maintenanceType: record.maintenanceType,
+      description: record.description,
+      performedBy: record.performedBy,
+      cost: record.cost,
+      meterReadingAtService: record.meterReadingAtService,
+      performedAt: Timestamp.fromDate(new Date(record.performedAt)),
+      createdAt: serverTimestamp(),
+    })
+  );
+  return ref.id;
+}
+
+/**
+ * Manually overrides a vehicle's status — pulling it for a recall
+ * ("out_of_service"), or putting it back into service ("ready"). This is
+ * a direct write, not a re-derivation: `recalculateVehicleStatus`
+ * (functions/src/index.ts) only runs off inspection/issue events, so
+ * "Return to Active" sets "ready" outright rather than checking for
+ * still-open issues first — the same way setting "out_of_service" is a
+ * direct write, not a computed one. Rule 1 of deriveVehicleStatus
+ * preserves whatever this writes until the next inspection or issue
+ * event recalculates it again.
+ *
+ * Also writes an auditLogs entry in the same batch, matching the shape
+ * `recalculateVehicleStatus` writes for automatic changes — except
+ * `performedBy` is the actual admin/fleet_manager (not "system") and
+ * `rule`/`triggeredBy` are "manual_override" rather than a Cloud
+ * Function name, so the two kinds of entry stay distinguishable in the
+ * audit trail.
+ *
+ * Requires a Firestore rules allowance beyond what the rest of this app
+ * assumes: auditLogs writes were previously denied to every client
+ * outright ("Cloud Functions/Admin SDK only"). firestore.rules now carves
+ * out one narrow exception — admin/fleet_manager may `create` (never
+ * update/delete) an auditLogs entry — specifically for this path.
+ */
+export async function overrideVehicleStatus(
+  orgId: string,
+  vehicleId: string,
+  newStatus: "out_of_service" | "ready",
+  performedByUserId: string
+): Promise<void> {
+  const vehicleRef = doc(db, "organizations", orgId, "vehicles", vehicleId);
+  const vehicleSnap = await getDoc(vehicleRef);
+  if (!vehicleSnap.exists()) {
+    throw new Error(`Vehicle ${vehicleId} not found in organization ${orgId}`);
+  }
+  const previousStatus = (vehicleSnap.data().status as AssetStatus | undefined) ?? "unknown";
+
+  const now = serverTimestamp();
+  const batch = writeBatch(db);
+  batch.update(vehicleRef, { status: newStatus, updatedAt: now });
+  batch.set(doc(collection(db, "organizations", orgId, "auditLogs")), {
+    organizationId: orgId,
+    action: "vehicle_status_changed",
+    entityType: "vehicle",
+    entityId: vehicleId,
+    performedBy: performedByUserId,
+    metadata: {
+      previousStatus,
+      newStatus,
+      rule: "manual_override",
+      triggeredBy: "manual_override",
+      triggeredByEntityId: vehicleId,
+    },
+    timestamp: now,
+  });
+  await batch.commit();
 }

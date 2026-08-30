@@ -10,7 +10,7 @@
  * profiles live nested under their org) — it's a flat, UID-keyed pointer
  * consulted first to resolve which org to look the profile up in.
  */
-import { doc, getDoc } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { convertTimestamps } from "../lib/firestoreUtils";
 import type { Organization, User } from "../types";
@@ -37,6 +37,17 @@ export async function getUserProfile(orgId: string, userId: string): Promise<Use
     return null;
   }
   return convertTimestamps<User>({ id: snapshot.id, organizationId: orgId, ...snapshot.data() });
+}
+
+/**
+ * Lists every user profile in an organization. No filter or sort —
+ * callers needing a lightweight name/roster (e.g. the work order
+ * "Assigned To" autocomplete) do their own client-side handling. Plain
+ * collection read, no index needed.
+ */
+export async function listUsers(orgId: string): Promise<User[]> {
+  const snapshot = await getDocs(collection(db, "organizations", orgId, "users"));
+  return snapshot.docs.map((d) => convertTimestamps<User>({ id: d.id, organizationId: orgId, ...d.data() }));
 }
 
 /**

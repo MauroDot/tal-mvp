@@ -21,11 +21,17 @@ import {
   getVehicleInspections,
   getVehicleIssues,
   getVehicleMaintenanceHistory,
+  overrideVehicleStatus,
 } from "@/services/vehicleService";
 import { OPEN_ISSUE_STATUSES } from "@/types";
-import type { Inspection, Issue, IssueSeverity, IssueStatus, MaintenanceRecord, Vehicle } from "@/types";
+import type { Inspection, Issue, IssueSeverity, IssueStatus, MaintenanceRecord, UserRole, Vehicle } from "@/types";
 
 type Tab = "issues" | "inspections" | "maintenance";
+
+/** Manual vehicle-status override is admin/fleet_manager only — narrower than
+ * ROUTE_ROLES.fleet (which also includes supervisor), and not a route gate
+ * since this is one control on an otherwise-open page, not a whole route. */
+const MANUAL_OVERRIDE_ROLES: readonly UserRole[] = ["admin", "fleet_manager"];
 
 const SEVERITY_STYLES: Record<IssueSeverity, string> = {
   low: "bg-gray-100 text-gray-700",
@@ -72,6 +78,9 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [userNames, setUserNames] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<Tab>("issues");
   const [expandedIssueId, setExpandedIssueId] = useState<string | null>(null);
+
+  const [overriding, setOverriding] = useState(false);
+  const [overrideError, setOverrideError] = useState<string | null>(null);
 
   // Redirect once auth state has resolved and no one is signed in.
   useEffect(() => {
@@ -161,9 +170,26 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
     };
   }, [user, vehicleId]);
 
+  async function handleOverride(newStatus: "out_of_service" | "ready") {
+    if (!user || !vehicle) {
+      return;
+    }
+    setOverriding(true);
+    setOverrideError(null);
+    try {
+      await overrideVehicleStatus(user.organizationId, vehicle.id, newStatus, user.id);
+      setVehicle({ ...vehicle, status: newStatus });
+    } catch (err) {
+      setOverrideError(err instanceof Error ? err.message : "Failed to update status.");
+    } finally {
+      setOverriding(false);
+    }
+  }
+
   const isResolvingAuth = authLoading || !firebaseUser;
   const openIssues = issues.filter((issue) => OPEN_ISSUE_STATUSES.includes(issue.status));
   const lastInspection = inspections[0];
+  const canOverrideStatus = user ? MANUAL_OVERRIDE_ROLES.includes(user.role) : false;
 
   return (
     <Layout>
@@ -232,6 +258,40 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
                 Report Defect
               </Link>
             </div>
+
+            {/* Manual status override — admin/fleet_manager only. Rule 1 of
+                deriveVehicleStatus (functions/src/index.ts) preserves
+                out_of_service/retired until something changes them; this is
+                that "something" for a human pulling a vehicle for a recall
+                or putting it back into service. */}
+            {canOverrideStatus && (
+              <div className="mt-4 border-t border-gray-100 pt-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-gray-400">Manual Override</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {vehicle.status !== "out_of_service" && (
+                    <button
+                      type="button"
+                      onClick={() => handleOverride("out_of_service")}
+                      disabled={overriding}
+                      className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {overriding ? "Updating…" : "Set Out of Service"}
+                    </button>
+                  )}
+                  {vehicle.status === "out_of_service" && (
+                    <button
+                      type="button"
+                      onClick={() => handleOverride("ready")}
+                      disabled={overriding}
+                      className="rounded-md border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {overriding ? "Updating…" : "Return to Active"}
+                    </button>
+                  )}
+                </div>
+                {overrideError && <p className="mt-2 text-xs text-red-600">{overrideError}</p>}
+              </div>
+            )}
           </div>
 
           {/* Tabs */}

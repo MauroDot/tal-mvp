@@ -112,10 +112,11 @@ service cloud.firestore {
 
       match /issues/{issueId} {
         allow read: if isOrgMember(orgId);
-        // No ownership constraint on create, matching "create for any
-        // member" as given — anyone in the org can file an issue
-        // attributed to any reportedByUserId, not just themselves.
-        allow create: if isOrgMember(orgId);
+        // Constrained to the requester, mirroring inspections'
+        // inspectorUserId check — filing a defect under someone else's
+        // name would defeat the audit trail.
+        allow create: if isOrgMember(orgId) &&
+          request.resource.data.reportedByUserId == request.auth.uid;
         allow update: if isOrgMember(orgId) && (
           resource.data.reportedByUserId == request.auth.uid ||
           userRole(orgId) in ['admin', 'fleet_manager', 'supervisor']
@@ -149,11 +150,20 @@ service cloud.firestore {
       // AuditLog has no per-entry targeting field to key off of (unlike
       // Alert), so this restricts the whole audit trail to management
       // roles rather than every member — an officer generally shouldn't
-      // see the full history of org-wide status changes. Write denied for
-      // the same Admin-SDK-bypass reason as alerts.
+      // see the full history of org-wide status changes. Every automatic
+      // entry (inspection completions, recalculateVehicleStatus) still
+      // comes exclusively from Cloud Functions via the Admin SDK, which
+      // bypasses this rule regardless. The one deliberate exception:
+      // admin/fleet_manager may `create` an entry directly — this is what
+      // lets the vehicle detail page's manual status override
+      // (src/services/vehicleService.ts, overrideVehicleStatus) log
+      // itself, since that action has no Cloud Function of its own.
+      // update/delete stay denied outright either way — the audit trail
+      // is append-only, even for the roles allowed to add to it.
       match /auditLogs/{auditLogId} {
         allow read: if hasRole(orgId, ['admin', 'fleet_manager', 'supervisor']);
-        allow write: if false;
+        allow create: if hasRole(orgId, ['admin', 'fleet_manager']);
+        allow update, delete: if false;
       }
 
       // Cloud-Functions-only counter doc (getNextWorkOrderNumber in
@@ -163,14 +173,12 @@ service cloud.firestore {
         allow read, write: if false;
       }
 
-      // Read for org members, write for admin/fleet_manager — as given.
-      // NOTE this write set is admin/fleet_manager only, narrower than
-      // workOrders' admin/fleet_manager/supervisor — worth double-checking
-      // that's deliberate and not a shorthand for "same as workOrders"
-      // (which would include supervisor).
+      // Read for org members, write for admin/fleet_manager/supervisor —
+      // matches workOrders: a supervisor who can close a work order can
+      // also log the maintenance that resolved it.
       match /maintenanceRecords/{recordId} {
         allow read: if isOrgMember(orgId);
-        allow write: if hasRole(orgId, ['admin', 'fleet_manager']);
+        allow write: if hasRole(orgId, ['admin', 'fleet_manager', 'supervisor']);
       }
     }
   }

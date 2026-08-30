@@ -437,7 +437,7 @@ export const onInspectionComplete = functions.firestore
 
 /**
  * Fires when a new Issue is created. Always creates a linked WorkOrder
- * (status "draft", priority derived from the issue's severity). Also
+ * (status "open", priority derived from the issue's severity). Also
  * creates a "critical_defect" Alert, but only when the issue's severity
  * is actually "critical" — tagging every issue as a critical defect
  * regardless of severity would make the alert type meaningless.
@@ -461,7 +461,7 @@ export const onIssueCreated = functions.firestore
       issueIds: [issueId],
       title: `Repair: ${issue.title}`,
       description: issue.description ?? null,
-      status: "draft",
+      status: "open",
       priority: severityToPriority(issue.severity),
       requestedByUserId: issue.reportedByUserId,
       createdAt: now,

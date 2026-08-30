@@ -51,12 +51,11 @@ export const OPEN_ISSUE_STATUSES: readonly IssueStatus[] = ["open", "acknowledge
 
 /** Lifecycle state of a WorkOrder. */
 export type WorkOrderStatus =
-  | "draft" // Created but not yet submitted/scheduled
-  | "scheduled" // Scheduled with a planned start date
+  | "open" // Created, not yet acknowledged by anyone
+  | "acknowledged" // Seen by a manager/supervisor, awaiting work starting
   | "in_progress" // Work has started
-  | "on_hold" // Paused (e.g. waiting on parts or approval)
-  | "completed" // Work finished
-  | "cancelled"; // Abandoned without completion
+  | "completed" // Work finished; the linked issue(s) are resolved as a result
+  | "cancelled"; // Abandoned without completion (not part of the normal forward flow)
 
 /** Priority used for scheduling WorkOrders. */
 export type WorkOrderPriority = "low" | "normal" | "high" | "urgent";
@@ -471,8 +470,14 @@ export interface WorkOrder {
   priority: WorkOrderPriority;
   /** User who created/requested the work order. */
   requestedByUserId: string;
-  /** User or technician assigned to perform the work, if internal. */
-  assignedToUserId?: string;
+  /**
+   * Free-text label for who's doing the work — a person's name or an
+   * outside shop ("Joe's Auto Shop"). Deliberately not a User reference:
+   * small departments route most repairs to outside vendors, so this
+   * can't be restricted to org accounts. The UI offers the org's users as
+   * autocomplete suggestions, but any text is accepted.
+   */
+  assignedTo?: string;
   /** Name of the outside vendor/shop performing the work, if external. */
   vendorName?: string;
   /** Planned start date for the work. */
