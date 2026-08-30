@@ -61,10 +61,10 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center bg-gray-50 px-4 py-12">
       <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
         <div className="mb-6 text-center">
-          <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-blue-600 text-lg font-bold text-white">
-            FR
+          <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-blue-600 text-base font-bold text-white">
+            TAL
           </span>
-          <h1 className="mt-3 text-xl font-semibold text-gray-900">Sign in to FleetReady</h1>
+          <h1 className="mt-3 text-xl font-semibold text-gray-900">Sign in to Tactical Asset Log</h1>
           <p className="mt-1 text-sm text-gray-500">Enter your credentials to continue.</p>
         </div>
 

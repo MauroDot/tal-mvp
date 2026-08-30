@@ -1,5 +1,5 @@
 /**
- * FleetReady Cloud Functions.
+ * Tactical Asset Log Cloud Functions.
  *
  * Written against the Cloud Functions 1st-gen ("v1") API — Firestore
  * onWrite/onCreate triggers and a Pub/Sub-backed scheduled function.

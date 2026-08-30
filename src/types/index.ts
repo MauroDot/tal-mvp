@@ -1,5 +1,5 @@
 /**
- * FleetReady core domain types.
+ * Tactical Asset Log core domain types.
  *
  * These interfaces describe the shape of data as it is stored and moved
  * through the application (API payloads, database rows mapped to camelCase,
@@ -114,7 +114,7 @@ export interface Organization {
 // ---------------------------------------------------------------------------
 
 /**
- * A person who can log into FleetReady. Always belongs to one Organization
+ * A person who can log into Tactical Asset Log. Always belongs to one Organization
  * and holds one primary role that determines their permissions.
  */
 export interface User {

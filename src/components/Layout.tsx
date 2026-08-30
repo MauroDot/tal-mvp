@@ -31,11 +31,11 @@ export default function Layout({ children }: LayoutProps) {
       <header className="sticky top-0 z-10 border-b border-gray-200 bg-white shadow-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-600 text-sm font-bold text-white">
-              FR
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-600 text-xs font-bold text-white">
+              TAL
             </span>
             <span className="truncate text-lg font-semibold text-blue-700">
-              FleetReady
+              Tactical Asset Log
             </span>
           </div>
 
@@ -64,7 +64,7 @@ export default function Layout({ children }: LayoutProps) {
 
       <footer className="border-t border-gray-200 bg-white">
         <div className="mx-auto max-w-6xl px-4 py-4 text-center text-xs text-gray-500 sm:px-6">
-          © {new Date().getFullYear()} FleetReady. All rights reserved.
+          © {new Date().getFullYear()} Tactical Asset Log. All rights reserved.
         </div>
       </footer>
     </div>
