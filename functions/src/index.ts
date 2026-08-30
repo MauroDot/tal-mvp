@@ -30,6 +30,17 @@
  *   organizations/{orgId}/alerts/{alertId}
  *   organizations/{orgId}/auditLogs/{auditLogId}
  *   organizations/{orgId}/counters/workOrders          -> { [year]: lastNumber }
+ *
+ * Vehicle status is never written directly by an individual trigger.
+ * `onInspectionComplete`, `onIssueCreated`, and `onIssueUpdated` each call
+ * the shared `recalculateVehicleStatus` helper after their own writes
+ * commit — it re-reads the current facts (open issues, latest completed
+ * inspection, current status) inside a transaction and derives one
+ * answer, so two triggers touching the same vehicle can't race and
+ * disagree. See the precedence rules on `deriveVehicleStatus` below.
+ * Its `completedAt`-ordered inspections query needs a composite index
+ * distinct from the existing `startedAt`-ordered one — see
+ * firestore.indexes.json.
  */
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore, Timestamp, FieldValue, type Transaction } from "firebase-admin/firestore";
@@ -41,8 +52,13 @@ initializeApp();
 const db = getFirestore();
 
 type AssetType = "vehicle" | "equipment";
+type AssetStatus = "ready" | "attention" | "maintenance_required" | "out_of_service" | "retired" | "unknown";
 type IssueSeverity = "low" | "medium" | "high" | "critical";
+type IssueStatus = "open" | "acknowledged" | "in_progress" | "resolved" | "closed";
 type WorkOrderPriority = "low" | "normal" | "high" | "urgent";
+
+const OPEN_ISSUE_STATUSES: IssueStatus[] = ["open", "acknowledged", "in_progress"];
+const RESOLVED_ISSUE_STATUSES: IssueStatus[] = ["resolved", "closed"];
 
 /** Mirrors `InspectionItemResult` in the web app's `src/types`. */
 interface InspectionItemResult {
@@ -72,7 +88,13 @@ interface IssueDoc {
   title: string;
   description?: string;
   severity: IssueSeverity;
+  status: IssueStatus;
   reportedByUserId: string;
+}
+
+/** Fields this file reads off an `organizations/{orgId}/vehicles/{id}` document. */
+interface VehicleDoc {
+  status?: AssetStatus;
 }
 
 /** Fields this file reads off an `organizations/{orgId}/equipment/{id}` document. */
@@ -118,6 +140,161 @@ function severityToPriority(severity: IssueSeverity): WorkOrderPriority {
   }
 }
 
+/** Identifies what caused a `recalculateVehicleStatus` call, for the audit log. */
+interface RecalculationTrigger {
+  source: "onInspectionComplete" | "onIssueCreated" | "onIssueUpdated";
+  entityId: string;
+}
+
+/** The facts `deriveVehicleStatus` decides from — nothing more. */
+interface VehicleStatusFacts {
+  currentStatus: AssetStatus;
+  /** Severities of issues currently open (not resolved/closed) against this vehicle. */
+  openIssueSeverities: IssueSeverity[];
+  /** `overallResult` of the most recent *completed* inspection, if any has ever completed. */
+  latestCompletedResult?: "pass" | "fail" | "pass_with_issues";
+}
+
+/**
+ * Derives a vehicle's status from the current facts. Precedence, first
+ * match wins:
+ *   1. Current status is "out_of_service" or "retired" -> keep it. These
+ *      are manual, human-set states; no automatic fact should override
+ *      them.
+ *   2. Most recent completed inspection result is "fail" -> "maintenance_required".
+ *      A raw failed checklist item means unfit for use, independent of
+ *      whether an Issue has been logged for it yet.
+ *   3. Any open issue with severity "critical" or "high" -> "maintenance_required".
+ *      This is checked before "ready" can ever be reached, so a passing
+ *      inspection can NOT clear maintenance_required while a
+ *      critical/high issue is still open.
+ *   4. Any open issue with severity "low" or "medium" -> "attention".
+ *   5. A completed inspection exists (pass or pass_with_issues) and no
+ *      open issues remain -> "ready".
+ *   6. No completed inspection has ever existed, and no open issues
+ *      exist -> "unknown" (no signal to derive a status from at all).
+ */
+function deriveVehicleStatus(facts: VehicleStatusFacts): { status: AssetStatus; rule: string } {
+  if (facts.currentStatus === "out_of_service" || facts.currentStatus === "retired") {
+    return { status: facts.currentStatus, rule: "manual_override_preserved" };
+  }
+  if (facts.latestCompletedResult === "fail") {
+    return { status: "maintenance_required", rule: "latest_inspection_failed" };
+  }
+  if (facts.openIssueSeverities.some((severity) => severity === "critical" || severity === "high")) {
+    return { status: "maintenance_required", rule: "open_high_or_critical_issue" };
+  }
+  if (facts.openIssueSeverities.length > 0) {
+    // Only low/medium severities can remain at this point.
+    return { status: "attention", rule: "open_low_or_medium_issue" };
+  }
+  if (facts.latestCompletedResult === "pass" || facts.latestCompletedResult === "pass_with_issues") {
+    return { status: "ready", rule: "clear_of_issues" };
+  }
+  return { status: "unknown", rule: "no_signal" };
+}
+
+/**
+ * Re-derives a vehicle's status from current facts and writes it if it
+ * changed, along with an AuditLog entry recording the previous/new
+ * status, which rule fired, and what triggered the recalculation. Runs
+ * inside a transaction so two near-simultaneous callers (e.g. an
+ * inspection completing and a critical issue being reported seconds
+ * apart) can't race and disagree — each sees a consistent read of the
+ * other's already-committed writes, or serializes against it.
+ *
+ * Must be called *after* the caller's own writes have committed (not
+ * folded into the same batch), since it needs to read data — e.g. a
+ * just-created Issue, or a just-updated Issue's new status — that the
+ * caller only just wrote.
+ */
+async function recalculateVehicleStatus(
+  orgId: string,
+  vehicleId: string,
+  trigger: RecalculationTrigger
+): Promise<void> {
+  const vehicleRef = db.doc(`organizations/${orgId}/vehicles/${vehicleId}`);
+
+  await db.runTransaction(async (tx: Transaction) => {
+    const vehicleSnap = await tx.get(vehicleRef);
+    if (!vehicleSnap.exists) {
+      logger.warn("recalculateVehicleStatus: vehicle not found, skipping", { orgId, vehicleId, trigger });
+      return;
+    }
+    const currentStatus = ((vehicleSnap.data() as VehicleDoc).status ?? "unknown") as AssetStatus;
+
+    // Reuses the same (assetType, assetId, reportedAt desc) index as
+    // getVehicleIssues in the web app — filtering to open statuses is
+    // done here in code rather than via a `status in [...]` clause, so
+    // this doesn't need its own separate composite index.
+    const issuesSnap = await tx.get(
+      db
+        .collection(`organizations/${orgId}/issues`)
+        .where("assetType", "==", "vehicle")
+        .where("assetId", "==", vehicleId)
+        .orderBy("reportedAt", "desc")
+    );
+    const openIssueSeverities = issuesSnap.docs
+      .map((d) => d.data() as { status: IssueStatus; severity: IssueSeverity })
+      .filter((issue) => OPEN_ISSUE_STATUSES.includes(issue.status))
+      .map((issue) => issue.severity);
+
+    // Ordering by completedAt (rather than startedAt) naturally excludes
+    // abandoned/in-progress inspections, since Firestore's orderBy skips
+    // documents missing that field entirely — no extra filter needed.
+    const latestInspectionSnap = await tx.get(
+      db
+        .collection(`organizations/${orgId}/inspections`)
+        .where("assetType", "==", "vehicle")
+        .where("assetId", "==", vehicleId)
+        .orderBy("completedAt", "desc")
+        .limit(1)
+    );
+    const latestCompletedResult = latestInspectionSnap.empty
+      ? undefined
+      : (latestInspectionSnap.docs[0].data().overallResult as VehicleStatusFacts["latestCompletedResult"]);
+
+    const { status: newStatus, rule } = deriveVehicleStatus({
+      currentStatus,
+      openIssueSeverities,
+      latestCompletedResult,
+    });
+
+    if (newStatus === currentStatus) {
+      return;
+    }
+
+    const now = Timestamp.now();
+    tx.update(vehicleRef, { status: newStatus, updatedAt: now });
+
+    const auditRef = db.collection(`organizations/${orgId}/auditLogs`).doc();
+    tx.set(auditRef, {
+      organizationId: orgId,
+      action: "vehicle_status_changed",
+      entityType: "vehicle",
+      entityId: vehicleId,
+      performedBy: "system",
+      metadata: {
+        previousStatus: currentStatus,
+        newStatus,
+        rule,
+        triggeredBy: trigger.source,
+        triggeredByEntityId: trigger.entityId,
+      },
+      timestamp: now,
+    });
+
+    logger.info("recalculateVehicleStatus: status changed", {
+      orgId,
+      vehicleId,
+      previousStatus: currentStatus,
+      newStatus,
+      rule,
+      trigger,
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 1. onInspectionComplete
 // ---------------------------------------------------------------------------
@@ -125,10 +302,11 @@ function severityToPriority(severity: IssueSeverity): WorkOrderPriority {
 /**
  * Fires when `completedAt` transitions from unset to set on an inspection
  * (guarded so it runs exactly once per completion, not on every later
- * edit). For each failed item, creates an Issue; sets the vehicle's
- * status to "maintenance_required" (any failures) or "ready" (all
- * passed); creates an "inspection_due" Alert for the template's next
- * recurrence date, if the template has one; and writes an AuditLog entry.
+ * edit). For each failed item, creates an Issue; recalculates the
+ * vehicle's status (see `recalculateVehicleStatus`) once those Issues
+ * exist; creates an "inspection_due" Alert for the template's next
+ * recurrence date, if the template has one; and writes an AuditLog entry
+ * for the inspection itself.
  */
 export const onInspectionComplete = functions.firestore
   .document("organizations/{orgId}/inspections/{inspectionId}")
@@ -184,16 +362,6 @@ export const onInspectionComplete = functions.firestore
       ...(createdIssueIds.length > 0 ? { issueIds: FieldValue.arrayUnion(...createdIssueIds) } : {}),
     });
 
-    // Vehicle status reflects the outcome (equipment status is left alone
-    // here since only "vehicle status" was asked for).
-    if (after.assetType === "vehicle") {
-      const vehicleRef = db.doc(`organizations/${orgId}/vehicles/${after.assetId}`);
-      batch.update(vehicleRef, {
-        status: failedItems.length > 0 ? "maintenance_required" : "ready",
-        updatedAt: now,
-      });
-    }
-
     // "inspection_due" Alert for the next recurrence, if the template
     // defines one.
     const templateSnap = await db.doc(`organizations/${orgId}/inspectionTemplates/${after.templateId}`).get();
@@ -241,6 +409,25 @@ export const onInspectionComplete = functions.firestore
       inspectionId,
       failedItemCount: failedItems.length,
     });
+
+    // Recalculate after the above commits, so the auto-created Issues
+    // (if any) are visible to it. Equipment is left alone here — that's
+    // expected and not warned about; anything else means the inspection's
+    // assetType is missing or invalid.
+    if (after.assetType === "vehicle") {
+      await recalculateVehicleStatus(orgId, after.assetId, {
+        source: "onInspectionComplete",
+        entityId: inspectionId,
+      });
+    } else if (after.assetType !== "equipment") {
+      logger.warn("onInspectionComplete: unexpected assetType, skipping vehicle status recalculation", {
+        orgId,
+        inspectionId,
+        assetType: after.assetType,
+        assetId: after.assetId,
+      });
+    }
+
     return null;
   });
 
@@ -303,11 +490,54 @@ export const onIssueCreated = functions.firestore
 
     await batch.commit();
     logger.info("onIssueCreated: created work order", { orgId, issueId, workOrderId: workOrderRef.id });
+
+    if (issue.assetType === "vehicle") {
+      await recalculateVehicleStatus(orgId, issue.assetId, { source: "onIssueCreated", entityId: issueId });
+    }
+
     return null;
   });
 
 // ---------------------------------------------------------------------------
-// 3. checkEquipmentExpiration
+// 3. onIssueUpdated
+// ---------------------------------------------------------------------------
+
+/**
+ * Fires on any write to an Issue. Only acts on a genuine transition into
+ * "resolved" or "closed" from some other status (or a doc created
+ * already in one of those states) — recalculates the vehicle's status so
+ * a fixed defect actually clears "attention"/"maintenance_required"
+ * instead of leaving it stuck there forever. Deliberately does not
+ * handle the reverse direction (an issue being reopened) — that's a
+ * real, symmetric gap, but out of scope here.
+ */
+export const onIssueUpdated = functions.firestore
+  .document("organizations/{orgId}/issues/{issueId}")
+  .onWrite(async (change, context) => {
+    const { orgId, issueId } = context.params as { orgId: string; issueId: string };
+
+    if (!change.after.exists) {
+      return null;
+    }
+    const after = change.after.data() as IssueDoc;
+    const before = change.before.exists ? (change.before.data() as IssueDoc) : undefined;
+
+    const wasOpen = !before || !RESOLVED_ISSUE_STATUSES.includes(before.status);
+    const isNowResolved = RESOLVED_ISSUE_STATUSES.includes(after.status);
+    if (!wasOpen || !isNowResolved) {
+      return null;
+    }
+
+    if (after.assetType !== "vehicle") {
+      return null;
+    }
+
+    await recalculateVehicleStatus(orgId, after.assetId, { source: "onIssueUpdated", entityId: issueId });
+    return null;
+  });
+
+// ---------------------------------------------------------------------------
+// 4. checkEquipmentExpiration
 // ---------------------------------------------------------------------------
 
 /**
