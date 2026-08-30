@@ -3,14 +3,19 @@
 /**
  * Fleet manager dashboard: every vehicle in the org (not just the current
  * user's assignments), a click-to-filter status summary, and a search box.
+ *
+ * Gated to ROUTE_ROLES.fleet (admin/fleet_manager/supervisor) via
+ * useRequireRole — see that hook for why this is UX only, not security.
  */
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import AccessDenied from "@/components/AccessDenied";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { formatDate } from "@/lib/dateUtils";
-import { useAuth } from "@/hooks/useAuth";
+import { ROUTE_ROLES } from "@/lib/routeAccess";
+import { useRequireRole } from "@/hooks/useRequireRole";
 import { getUserProfile } from "@/services/organizationService";
 import { getLatestCompletedInspection, getVehicleIssues, listVehicles } from "@/services/vehicleService";
 import { OPEN_ISSUE_STATUSES } from "@/types";
@@ -58,7 +63,7 @@ interface VehicleRowDetail {
 
 export default function FleetPage() {
   const router = useRouter();
-  const { user, firebaseUser, loading: authLoading } = useAuth();
+  const { status, user } = useRequireRole(ROUTE_ROLES.fleet);
 
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [rowDetails, setRowDetails] = useState<Record<string, VehicleRowDetail>>({});
@@ -68,17 +73,12 @@ export default function FleetPage() {
   const [statusFilter, setStatusFilter] = useState<AssetStatus | null>(null);
   const [search, setSearch] = useState("");
 
-  // Redirect once auth state has resolved and no one is signed in.
-  useEffect(() => {
-    if (!authLoading && !firebaseUser) {
-      router.replace("/auth/login");
-    }
-  }, [authLoading, firebaseUser, router]);
-
   // Load every vehicle in the org, then enrich each row (officer name,
-  // last completed inspection, open issue count) in a second pass.
+  // last completed inspection, open issue count) in a second pass. Only
+  // once the role guard has actually allowed access — a denied/loading
+  // user shouldn't trigger an org-wide fleet read in the background.
   useEffect(() => {
-    if (!user) {
+    if (status !== "allowed" || !user) {
       return;
     }
     let cancelled = false;
@@ -153,7 +153,7 @@ export default function FleetPage() {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [status, user]);
 
   const statusCounts = useMemo(() => {
     const counts: Partial<Record<AssetStatus, number>> = {};
@@ -172,12 +172,12 @@ export default function FleetPage() {
       .sort((a, b) => STATUS_SORT_ORDER[a.status] - STATUS_SORT_ORDER[b.status]);
   }, [vehicles, statusFilter, search]);
 
-  const isResolvingAuth = authLoading || !firebaseUser;
-
   return (
     <Layout>
-      {isResolvingAuth ? (
+      {status === "loading" ? (
         <p className="text-sm text-gray-500">Loading…</p>
+      ) : status === "denied" ? (
+        <AccessDenied requiredRoles={ROUTE_ROLES.fleet} />
       ) : (
         <div className="mx-auto max-w-6xl">
           <div className="mb-6">

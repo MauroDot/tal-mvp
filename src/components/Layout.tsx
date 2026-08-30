@@ -5,7 +5,9 @@
  * around page content. Mobile-first, gray/blue color scheme.
  */
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { useAuth } from "../hooks/useAuth";
+import { ROUTE_ROLES } from "../lib/routeAccess";
 
 interface LayoutProps {
   children: ReactNode;
@@ -17,6 +19,10 @@ export default function Layout({ children }: LayoutProps) {
   const displayName = user
     ? `${user.firstName} ${user.lastName}`
     : (firebaseUser?.email ?? (loading ? "Loading…" : null));
+
+  // Mirrors ROUTE_ROLES.fleet — an officer shouldn't see a link that will
+  // just reject them (see useRequireRole for the actual gate).
+  const canSeeFleetNav = user ? ROUTE_ROLES.fleet.includes(user.role) : false;
 
   const handleLogout = async () => {
     try {
@@ -30,13 +36,26 @@ export default function Layout({ children }: LayoutProps) {
     <div className="flex min-h-screen flex-col bg-gray-50 text-gray-900">
       <header className="sticky top-0 z-10 border-b border-gray-200 bg-white shadow-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-600 text-xs font-bold text-white">
-              TAL
-            </span>
-            <span className="truncate text-lg font-semibold text-blue-700">
-              Tactical Asset Log
-            </span>
+          <div className="flex min-w-0 items-center gap-4">
+            <Link href="/dashboard" className="flex min-w-0 shrink-0 items-center gap-2">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-600 text-xs font-bold text-white">
+                TAL
+              </span>
+              <span className="truncate text-lg font-semibold text-blue-700">
+                Tactical Asset Log
+              </span>
+            </Link>
+
+            {canSeeFleetNav && (
+              <nav className="hidden sm:block">
+                <Link
+                  href="/fleet"
+                  className="text-sm font-medium text-gray-600 hover:text-blue-700"
+                >
+                  Fleet
+                </Link>
+              </nav>
+            )}
           </div>
 
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">

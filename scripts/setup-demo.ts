@@ -19,14 +19,17 @@
  * write is still "in" the script.
  *
  * Usage:
- *   npm run seed -- <officerUid> [fleetManagerUid] [officer2Uid]
+ *   npm run seed -- <officerUid> <fleetManagerUid> <officer2Uid>
  *
- * <officerUid> is required — the Firebase Auth UID of the
- * officer@example.com account (Firebase Console -> Authentication -> that
- * user's row). [fleetManagerUid] and [officer2Uid] are optional; if
- * omitted, obviously-fake placeholder UIDs are used instead so the script
- * still runs — replace them (or pass real UIDs) once those accounts
- * exist, and re-run to fix the seeded docs in place.
+ * All three are required Firebase Auth UIDs for three distinct,
+ * already-existing accounts (Firebase Console -> Authentication -> that
+ * user's row). Each is looked up via Admin Auth before anything is
+ * written (see `resolveSeedUsers`) — email and display name always come
+ * from the real account, never a hardcoded persona, and the script
+ * refuses to write anything if any lookup fails. Only the *role* each UID
+ * gets is positional (officerUid/officer2Uid -> "officer", fleetManagerUid
+ * -> "fleet_manager") — that's the one thing genuinely being chosen by
+ * argument order, so double-check it before running.
  *
  * Requires a service account key saved at <repo root>/serviceAccountKey.json
  * (Firebase Console -> Project settings -> Service accounts -> Generate new
@@ -35,17 +38,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
-import { getFirestore, Timestamp, type DocumentReference } from "firebase-admin/firestore";
-import type { InspectionItemResult, IssueSeverity, TemplateItem } from "../src/types";
+import { getAuth, type UserRecord } from "firebase-admin/auth";
+import { FieldValue, getFirestore, Timestamp, type DocumentReference } from "firebase-admin/firestore";
+import type { InspectionItemResult, IssueSeverity, TemplateItem, UserRole } from "../src/types";
 
 const SERVICE_ACCOUNT_PATH = path.resolve(__dirname, "..", "serviceAccountKey.json");
 const ORG_ID = "demo-org";
 const VEHICLE_ID = "unit-312";
 const TEMPLATE_ID = "template-1";
-const OFFICER_EMAIL = "officer@example.com";
-
-const PLACEHOLDER_FLEET_MANAGER_UID = "REPLACE_WITH_FLEET_MANAGER_UID";
-const PLACEHOLDER_OFFICER2_UID = "REPLACE_WITH_OFFICER2_UID";
 
 function loadServiceAccount(): ServiceAccount {
   if (!fs.existsSync(SERVICE_ACCOUNT_PATH)) {
@@ -61,19 +61,113 @@ function loadServiceAccount(): ServiceAccount {
 }
 
 function getCliArgs(): { officerUid: string; fleetManagerUid: string; officer2Uid: string } {
-  const officerUid = process.argv[2];
-  if (!officerUid) {
+  const [officerUid, fleetManagerUid, officer2Uid] = process.argv.slice(2);
+  if (!officerUid || !fleetManagerUid || !officer2Uid) {
     console.error(
-      "Usage: npm run seed -- <officerUid> [fleetManagerUid] [officer2Uid]\n\n" +
-        "Pass the Firebase Auth UID of the officer@example.com account this demo\n" +
-        "data should belong to (Firebase Console -> Authentication -> that user's row).\n" +
-        "fleetManagerUid/officer2Uid are optional — placeholders are used if omitted."
+      "Usage: npm run seed -- <officerUid> <fleetManagerUid> <officer2Uid>\n\n" +
+        "All three are required Firebase Auth UIDs (Firebase Console -> Authentication\n" +
+        "-> that user's row) for three distinct, already-existing accounts. Each one is\n" +
+        "looked up via Admin Auth before anything is written — see resolveSeedUsers."
     );
     process.exit(1);
   }
-  const fleetManagerUid = process.argv[3] || PLACEHOLDER_FLEET_MANAGER_UID;
-  const officer2Uid = process.argv[4] || PLACEHOLDER_OFFICER2_UID;
   return { officerUid, fleetManagerUid, officer2Uid };
+}
+
+/** Turns "k.ramirez" (from k.ramirez@tulsaexample.gov) into "K Ramirez". */
+function deriveNameFromEmail(email: string): { firstName: string; lastName: string } {
+  const localPart = email.split("@")[0] ?? email;
+  const tokens = localPart
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1));
+
+  if (tokens.length === 0) {
+    return { firstName: email, lastName: "" };
+  }
+  if (tokens.length === 1) {
+    return { firstName: tokens[0], lastName: "" };
+  }
+  return { firstName: tokens[0], lastName: tokens.slice(1).join(" ") };
+}
+
+/**
+ * Resolves a display name for a seeded user: the Auth account's real
+ * `displayName` if it has one, split into first/last on the first space;
+ * otherwise something readable derived from the email — never an
+ * invented persona unrelated to who's actually signing in.
+ */
+function resolveDisplayName(record: UserRecord): { firstName: string; lastName: string } {
+  const displayName = record.displayName?.trim();
+  if (displayName) {
+    const [firstName, ...rest] = displayName.split(/\s+/);
+    return { firstName, lastName: rest.join(" ") };
+  }
+  return deriveNameFromEmail(record.email ?? record.uid);
+}
+
+interface ResolvedSeedUser {
+  uid: string;
+  role: UserRole;
+  email: string;
+  firstName: string;
+  lastName: string;
+}
+
+/**
+ * Looks up all three UIDs via Admin Auth, prints "UID -> email" for each,
+ * and refuses to write anything to Firestore if any lookup fails (wrong
+ * UID, deleted account, or an account with no email) — the whole reason
+ * the previous run seeded k.ramirez@tulsaexample.gov's real account as
+ * "Alex Rivera / fleet_manager" is that nothing ever verified a UID
+ * actually belonged to the identity it was about to be labeled with.
+ * Role assignment stays positional (officerUid/officer2Uid -> "officer",
+ * fleetManagerUid -> "fleet_manager") — that's the one thing the caller
+ * is genuinely choosing; name and email always come from the real account.
+ */
+async function resolveSeedUsers(uids: {
+  officerUid: string;
+  fleetManagerUid: string;
+  officer2Uid: string;
+}): Promise<ResolvedSeedUser[]> {
+  const auth = getAuth();
+  const requests: Array<{ label: string; uid: string; role: UserRole }> = [
+    { label: "officerUid", uid: uids.officerUid, role: "officer" },
+    { label: "fleetManagerUid", uid: uids.fleetManagerUid, role: "fleet_manager" },
+    { label: "officer2Uid", uid: uids.officer2Uid, role: "officer" },
+  ];
+
+  console.log("Verifying UIDs against Firebase Auth:");
+  const results = await Promise.allSettled(requests.map((r) => auth.getUser(r.uid)));
+
+  let hasFailure = false;
+  const resolved: ResolvedSeedUser[] = [];
+
+  results.forEach((result, index) => {
+    const request = requests[index];
+    if (result.status === "rejected") {
+      hasFailure = true;
+      const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      console.error(`  ${request.label} (${request.uid}) -> LOOKUP FAILED: ${message}`);
+      return;
+    }
+    const record = result.value;
+    if (!record.email) {
+      hasFailure = true;
+      console.error(`  ${request.label} (${request.uid}) -> account has no email; can't seed a profile for it.`);
+      return;
+    }
+    console.log(`  ${request.label} (${request.uid}) -> ${record.email}`);
+    const { firstName, lastName } = resolveDisplayName(record);
+    resolved.push({ uid: request.uid, role: request.role, email: record.email, firstName, lastName });
+  });
+
+  if (hasFailure) {
+    console.error("\nAborting: one or more UIDs failed verification. Nothing was written.");
+    process.exit(1);
+  }
+
+  return resolved;
 }
 
 /**
@@ -314,15 +408,16 @@ async function main() {
   initializeApp({ credential: cert(loadServiceAccount()) });
   const db = getFirestore();
 
+  // Verify every UID against real Auth accounts *before* writing anything
+  // — see resolveSeedUsers for why.
+  const resolvedUsers = await resolveSeedUsers({ officerUid, fleetManagerUid, officer2Uid });
+
   const officerUidByKey: Record<Exclude<OfficerKey, null>, string> = {
     officer1: officerUid,
     officer2: officer2Uid,
   };
 
-  console.log(`Seeding demo data:`);
-  console.log(`  officer1 (existing): ${officerUid}`);
-  console.log(`  officer2: ${officer2Uid}${officer2Uid === PLACEHOLDER_OFFICER2_UID ? " (placeholder)" : ""}`);
-  console.log(`  fleetManager: ${fleetManagerUid}${fleetManagerUid === PLACEHOLDER_FLEET_MANAGER_UID ? " (placeholder)" : ""}\n`);
+  console.log("\nSeeding demo data:");
 
   await db.doc(`organizations/${ORG_ID}`).set(
     {
@@ -336,13 +431,7 @@ async function main() {
 
   // --- Users -----------------------------------------------------------
 
-  const users = [
-    { uid: officerUid, email: OFFICER_EMAIL, firstName: "Officer", lastName: "Smith", role: "officer" },
-    { uid: officer2Uid, email: "officer2@example.com", firstName: "Officer", lastName: "Ramirez", role: "officer" },
-    { uid: fleetManagerUid, email: "manager@example.com", firstName: "Alex", lastName: "Rivera", role: "fleet_manager" },
-  ];
-
-  for (const u of users) {
+  for (const u of resolvedUsers) {
     await db.doc(`userOrgs/${u.uid}`).set({ organizationId: ORG_ID, email: u.email }, { merge: true });
     await db.doc(`organizations/${ORG_ID}/users/${u.uid}`).set(
       {
@@ -352,10 +441,17 @@ async function main() {
         role: u.role,
         organizationId: ORG_ID,
         isActive: true,
+        // Cleans up `name`/`status` fields a much earlier version of this
+        // script wrote (before firstName/lastName/isActive existed) —
+        // merge never removes fields on its own, and a no-op delete on a
+        // doc that never had them is harmless, so this runs for all three
+        // rather than just the one document it was actually found on.
+        name: FieldValue.delete(),
+        status: FieldValue.delete(),
       },
       { merge: true }
     );
-    console.log(`  organizations/${ORG_ID}/users/${u.uid} (${u.role})`);
+    console.log(`  organizations/${ORG_ID}/users/${u.uid} (${u.role}, ${u.firstName} ${u.lastName})`);
   }
 
   // --- unit-312 (pre-existing — status write is initial-only, see header comment) ---

@@ -2,32 +2,25 @@
 
 /**
  * Officer's landing page after sign-in: lists the vehicles currently
- * assigned to them, with a per-vehicle "Start Inspection" action.
- * Redirects to /auth/login if no one is signed in.
+ * assigned to them, with a per-vehicle "Start Inspection" action. Open to
+ * any authenticated user regardless of role — see useRequireRole.
  */
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
-import { useAuth } from "@/hooks/useAuth";
+import { useRequireRole } from "@/hooks/useRequireRole";
 import { listVehicles } from "@/services/vehicleService";
 import type { Vehicle } from "@/types";
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { user, firebaseUser, loading: authLoading, error: authError } = useAuth();
+  const { status, user, error: authError } = useRequireRole();
 
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [vehiclesLoading, setVehiclesLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Redirect once auth state has resolved and no one is signed in.
-  useEffect(() => {
-    if (!authLoading && !firebaseUser) {
-      router.replace("/auth/login");
-    }
-  }, [authLoading, firebaseUser, router]);
 
   // Fetch vehicles assigned to the current officer once their profile loads.
   useEffect(() => {
@@ -68,11 +61,9 @@ export default function DashboardPage() {
     router.push(`/inspections/new?vehicleId=${vehicleId}`);
   };
 
-  const isResolvingAuth = authLoading || !firebaseUser;
-
   return (
     <Layout>
-      {isResolvingAuth ? (
+      {status === "loading" ? (
         <p className="text-sm text-gray-500">Loading…</p>
       ) : (
         <>
