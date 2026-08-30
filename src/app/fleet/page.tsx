@@ -72,6 +72,11 @@ export default function FleetPage() {
 
   const [statusFilter, setStatusFilter] = useState<AssetStatus | null>(null);
   const [search, setSearch] = useState("");
+  // Retired vehicles drop off the default view — a department needs the
+  // history, not a reminder every time they open the fleet page.
+  const [showRetired, setShowRetired] = useState(false);
+
+  const canManageVehicles = user ? ROUTE_ROLES.vehicleManagement.includes(user.role) : false;
 
   // Load every vehicle in the org, then enrich each row (officer name,
   // last completed inspection, open issue count) in a second pass. Only
@@ -166,11 +171,12 @@ export default function FleetPage() {
   const visibleVehicles = useMemo(() => {
     const q = search.trim().toLowerCase();
     return vehicles
+      .filter((v) => showRetired || v.status !== "retired")
       .filter((v) => !statusFilter || v.status === statusFilter)
       .filter((v) => !q || v.unitNumber.toLowerCase().includes(q))
       .slice()
       .sort((a, b) => STATUS_SORT_ORDER[a.status] - STATUS_SORT_ORDER[b.status]);
-  }, [vehicles, statusFilter, search]);
+  }, [vehicles, statusFilter, search, showRetired]);
 
   return (
     <Layout>
@@ -180,9 +186,19 @@ export default function FleetPage() {
         <AccessDenied requiredRoles={ROUTE_ROLES.fleet} />
       ) : (
         <div className="mx-auto max-w-6xl">
-          <div className="mb-6">
-            <h1 className="text-xl font-semibold text-gray-900 sm:text-2xl">Fleet</h1>
-            <p className="mt-1 text-sm text-gray-500">All vehicles in your organization.</p>
+          <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h1 className="text-xl font-semibold text-gray-900 sm:text-2xl">Fleet</h1>
+              <p className="mt-1 text-sm text-gray-500">All vehicles in your organization.</p>
+            </div>
+            {canManageVehicles && (
+              <Link
+                href="/vehicle/new"
+                className="shrink-0 rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700"
+              >
+                + Add Vehicle
+              </Link>
+            )}
           </div>
 
           {error && (
@@ -236,6 +252,15 @@ export default function FleetPage() {
                     <span aria-hidden="true">×</span>
                   </button>
                 )}
+                <label className="inline-flex items-center gap-1.5 text-sm text-gray-600">
+                  <input
+                    type="checkbox"
+                    checked={showRetired}
+                    onChange={(event) => setShowRetired(event.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  Show retired vehicles
+                </label>
               </div>
 
               {/* Vehicle list */}

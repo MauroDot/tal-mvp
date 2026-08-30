@@ -107,6 +107,13 @@ function InspectionFormPage() {
         if (!templateResult) {
           throw new Error("Inspection template not found.");
         }
+        // Defense in depth against a stale link/bookmark — the vehicle
+        // detail page already hides "Start Inspection" for a retired
+        // vehicle (see vehicle/[id]/page.tsx), but this route is directly
+        // reachable by URL regardless.
+        if (vehicleResult.status === "retired") {
+          throw new Error("This vehicle is retired and can't have new inspections started.");
+        }
 
         const newInspectionId = await startInspection(
           currentUser.organizationId,

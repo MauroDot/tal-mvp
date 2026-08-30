@@ -14,8 +14,8 @@
  * on first run if they don't exist yet.
  */
 import {
-  addDoc,
   collection,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -25,7 +25,6 @@ import {
   serverTimestamp,
   setDoc,
   Timestamp,
-  updateDoc,
   where,
   writeBatch,
   type QueryConstraint,
@@ -39,9 +38,6 @@ export interface VehicleFilter {
   status?: AssetStatus;
   assignedUserId?: string;
 }
-
-/** Fields the caller supplies when creating a new vehicle; the rest are server-assigned. */
-export type NewVehicle = Omit<Vehicle, "id" | "organizationId" | "createdAt" | "updatedAt">;
 
 /**
  * Fetches a single Vehicle by ID from `organizations/{orgId}/vehicles/{vehicleId}`.
@@ -76,35 +72,260 @@ export async function listVehicles(orgId: string, filter?: VehicleFilter): Promi
 }
 
 /**
- * Creates a new vehicle under `organizations/{orgId}/vehicles`.
- * `createdAt`/`updatedAt` are set via `serverTimestamp()`; the returned
- * object approximates them with the current client time since the
- * server-resolved value isn't available until the write is read back.
+ * True if no *other* vehicle in the org already has this unit number
+ * (exact match, same casing the form collects). Pass `excludeVehicleId`
+ * when checking during an edit so a vehicle doesn't collide with itself.
+ * A single equality `where()` — Firestore auto-indexes single fields, so
+ * this needs no entry in firestore.indexes.json.
  */
-export async function createVehicle(orgId: string, vehicle: NewVehicle): Promise<Vehicle> {
-  const docRef = await addDoc(collection(db, "organizations", orgId, "vehicles"), {
-    ...vehicle,
-    organizationId: orgId,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
+export async function isUnitNumberAvailable(
+  orgId: string,
+  unitNumber: string,
+  excludeVehicleId?: string
+): Promise<boolean> {
+  const q = query(collection(db, "organizations", orgId, "vehicles"), where("unitNumber", "==", unitNumber));
+  const snapshot = await getDocs(q);
+  return snapshot.docs.every((d) => d.id === excludeVehicleId);
+}
 
-  const now = new Date().toISOString();
-  return { ...vehicle, id: docRef.id, organizationId: orgId, createdAt: now, updatedAt: now };
+/** Fields the management UI collects for a new vehicle. `status` isn't among them — see addVehicle. */
+export interface NewVehicleFields {
+  unitNumber: string;
+  year?: number;
+  make?: string;
+  model?: string;
+  vin?: string;
+  odometer?: number;
+  /** Officer to assign the vehicle to; omit/empty for unassigned. */
+  assignedUserId?: string;
 }
 
 /**
- * Updates a vehicle's odometer reading and bumps `updatedAt`.
+ * Creates a new vehicle. Always starts at status "unknown" — never
+ * inspected, no signal yet to derive anything else from (see
+ * deriveVehicleStatus's precedence rules, functions/src/index.ts) —
+ * callers don't get to set it. Validates unitNumber is unique within the
+ * org first and throws if it's already taken. Writes an auditLogs
+ * "vehicle_created" entry in the same batch, matching the shape
+ * `overrideVehicleStatus` uses. Returns the new vehicle's ID.
  */
-export async function updateVehicleMileage(
+export async function addVehicle(
+  orgId: string,
+  fields: NewVehicleFields,
+  performedByUserId: string
+): Promise<string> {
+  const unitNumber = fields.unitNumber.trim();
+  if (!unitNumber) {
+    throw new Error("Unit number is required.");
+  }
+  if (!(await isUnitNumberAvailable(orgId, unitNumber))) {
+    throw new Error(`Unit number "${unitNumber}" is already in use in this organization.`);
+  }
+
+  const vehicleRef = doc(collection(db, "organizations", orgId, "vehicles"));
+  const now = serverTimestamp();
+  const batch = writeBatch(db);
+  batch.set(
+    vehicleRef,
+    stripUndefined({
+      organizationId: orgId,
+      unitNumber,
+      year: fields.year,
+      make: fields.make?.trim() || undefined,
+      model: fields.model?.trim() || undefined,
+      vin: fields.vin?.trim() || undefined,
+      odometer: fields.odometer,
+      assignedUserId: fields.assignedUserId || undefined,
+      status: "unknown",
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  batch.set(doc(collection(db, "organizations", orgId, "auditLogs")), {
+    organizationId: orgId,
+    action: "vehicle_created",
+    entityType: "vehicle",
+    entityId: vehicleRef.id,
+    performedBy: performedByUserId,
+    metadata: { unitNumber, status: "unknown" },
+    timestamp: now,
+  });
+  await batch.commit();
+  return vehicleRef.id;
+}
+
+/** Fields the management UI collects when editing an existing vehicle. */
+export interface VehicleEditFields {
+  unitNumber: string;
+  year?: number;
+  make?: string;
+  model?: string;
+  vin?: string;
+  odometer?: number;
+  assignedUserId?: string;
+}
+
+export interface UpdateVehicleResult {
+  /** True if a lower odometer value was submitted and *not* applied — see updateVehicle. */
+  odometerSkipped: boolean;
+}
+
+/**
+ * Edits a vehicle's identifying/assignment fields. Re-validates
+ * unitNumber uniqueness (excluding this vehicle itself) if it changed.
+ *
+ * Odometer is monotonic — this never lets it decrease. If the submitted
+ * value is lower than what's currently stored, the stored value is kept
+ * and `odometerSkipped: true` comes back so the UI can say so. That's a
+ * simpler and more robust guarantee than trying to detect "this form was
+ * loaded before a newer reading came in": it holds regardless of *what*
+ * produced the higher reading (today, nothing else writes odometer — no
+ * inspection flow touches it — but the guard costs nothing and holds up
+ * if/when one does).
+ *
+ * Clearing an optional field in the form removes it from the document
+ * (via `deleteField()`) rather than leaving the old value in place.
+ * Writes an auditLogs "vehicle_updated" entry listing which fields
+ * changed — skipped entirely if nothing actually did.
+ */
+export async function updateVehicle(
   orgId: string,
   vehicleId: string,
-  mileage: number
-): Promise<void> {
-  await updateDoc(doc(db, "organizations", orgId, "vehicles", vehicleId), {
-    odometer: mileage,
-    updatedAt: serverTimestamp(),
+  fields: VehicleEditFields,
+  performedByUserId: string
+): Promise<UpdateVehicleResult> {
+  const vehicleRef = doc(db, "organizations", orgId, "vehicles", vehicleId);
+  const snap = await getDoc(vehicleRef);
+  if (!snap.exists()) {
+    throw new Error(`Vehicle ${vehicleId} not found in organization ${orgId}`);
+  }
+  const current = snap.data() as Record<string, unknown>;
+
+  const unitNumber = fields.unitNumber.trim();
+  if (!unitNumber) {
+    throw new Error("Unit number is required.");
+  }
+  if (unitNumber !== current.unitNumber && !(await isUnitNumberAvailable(orgId, unitNumber, vehicleId))) {
+    throw new Error(`Unit number "${unitNumber}" is already in use in this organization.`);
+  }
+
+  const currentOdometer = typeof current.odometer === "number" ? current.odometer : undefined;
+  const odometerSkipped =
+    fields.odometer != null && currentOdometer != null && fields.odometer < currentOdometer;
+
+  // undefined here means "clear this field" — resolved to deleteField()
+  // below, once the diff against `current` is computed off plain values.
+  const resolved: Record<string, unknown> = {
+    unitNumber,
+    year: fields.year ?? undefined,
+    make: fields.make?.trim() || undefined,
+    model: fields.model?.trim() || undefined,
+    vin: fields.vin?.trim() || undefined,
+    assignedUserId: fields.assignedUserId || undefined,
+  };
+  if (fields.odometer != null && !odometerSkipped) {
+    resolved.odometer = fields.odometer;
+  }
+
+  const changedFields = Object.keys(resolved).filter((key) => (resolved[key] ?? null) !== (current[key] ?? null));
+
+  const now = serverTimestamp();
+  const batch = writeBatch(db);
+  const updatePayload: Record<string, unknown> = { updatedAt: now };
+  for (const [key, value] of Object.entries(resolved)) {
+    updatePayload[key] = value === undefined ? deleteField() : value;
+  }
+  batch.update(vehicleRef, updatePayload);
+
+  if (changedFields.length > 0) {
+    batch.set(doc(collection(db, "organizations", orgId, "auditLogs")), {
+      organizationId: orgId,
+      action: "vehicle_updated",
+      entityType: "vehicle",
+      entityId: vehicleId,
+      performedBy: performedByUserId,
+      metadata: { changedFields },
+      timestamp: now,
+    });
+  }
+
+  await batch.commit();
+  return { odometerSkipped };
+}
+
+/**
+ * Retires a vehicle — sets status to "retired" rather than deleting it.
+ * Inspection and maintenance history stay exactly as they are; the
+ * vehicle just drops off the fleet page's default view (see
+ * fleet/page.tsx's `showRetired` toggle) and can no longer have new
+ * inspections started (see inspections/new/page.tsx). No delete path is
+ * offered anywhere — a department needs the history.
+ *
+ * Sets `outOfServiceDate` to today, and writes an auditLogs
+ * "vehicle_retired" entry recording the previous status, matching the
+ * shape `overrideVehicleStatus` uses.
+ */
+export async function retireVehicle(orgId: string, vehicleId: string, performedByUserId: string): Promise<void> {
+  const vehicleRef = doc(db, "organizations", orgId, "vehicles", vehicleId);
+  const snap = await getDoc(vehicleRef);
+  if (!snap.exists()) {
+    throw new Error(`Vehicle ${vehicleId} not found in organization ${orgId}`);
+  }
+  const previousStatus = (snap.data().status as AssetStatus | undefined) ?? "unknown";
+
+  const now = serverTimestamp();
+  const batch = writeBatch(db);
+  batch.update(vehicleRef, { status: "retired", outOfServiceDate: new Date().toISOString(), updatedAt: now });
+  batch.set(doc(collection(db, "organizations", orgId, "auditLogs")), {
+    organizationId: orgId,
+    action: "vehicle_retired",
+    entityType: "vehicle",
+    entityId: vehicleId,
+    performedBy: performedByUserId,
+    metadata: { previousStatus, newStatus: "retired" },
+    timestamp: now,
   });
+  await batch.commit();
+}
+
+/**
+ * Changes (or clears, with `assignedUserId: null`) which officer a
+ * vehicle is assigned to. A dedicated, single-field action distinct from
+ * the general edit flow — `updateVehicle` can also touch `assignedUserId`
+ * as part of a broader edit, but going through *this* path logs a
+ * "vehicle_reassigned" entry rather than "vehicle_updated", so the audit
+ * trail can tell "the record changed" apart from "this vehicle changed
+ * hands" at a glance.
+ */
+export async function reassignVehicle(
+  orgId: string,
+  vehicleId: string,
+  assignedUserId: string | null,
+  performedByUserId: string
+): Promise<void> {
+  const vehicleRef = doc(db, "organizations", orgId, "vehicles", vehicleId);
+  const snap = await getDoc(vehicleRef);
+  if (!snap.exists()) {
+    throw new Error(`Vehicle ${vehicleId} not found in organization ${orgId}`);
+  }
+  const previousAssignedUserId = (snap.data().assignedUserId as string | undefined) ?? null;
+
+  const now = serverTimestamp();
+  const batch = writeBatch(db);
+  batch.update(vehicleRef, {
+    assignedUserId: assignedUserId ? assignedUserId : deleteField(),
+    updatedAt: now,
+  });
+  batch.set(doc(collection(db, "organizations", orgId, "auditLogs")), {
+    organizationId: orgId,
+    action: "vehicle_reassigned",
+    entityType: "vehicle",
+    entityId: vehicleId,
+    performedBy: performedByUserId,
+    metadata: { previousAssignedUserId, newAssignedUserId: assignedUserId },
+    timestamp: now,
+  });
+  await batch.commit();
 }
 
 /**

@@ -159,6 +159,22 @@ describe("vehicles: read for any member, write for admin/fleet_manager", () => {
       })
     );
   });
+
+  it("allows a fleet_manager to update a vehicle (e.g. retire/reassign)", async () => {
+    const managerA = ctxFor("manager-a");
+    await assertSucceeds(
+      setDoc(
+        doc(managerA, "organizations", ORG_A, "vehicles", "vehicle-a1"),
+        { status: "retired" },
+        { merge: true }
+      )
+    );
+  });
+
+  it("denies even a fleet_manager deleting a vehicle — no delete path is offered; history must survive", async () => {
+    const managerA = ctxFor("manager-a");
+    await assertFails(deleteDoc(doc(managerA, "organizations", ORG_A, "vehicles", "vehicle-a1")));
+  });
 });
 
 describe("inspections: create only where inspectorUserId is the requester", () => {

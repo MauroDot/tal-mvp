@@ -15,23 +15,21 @@ import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { useAuth } from "@/hooks/useAuth";
 import { formatDate } from "@/lib/dateUtils";
-import { getUserProfile } from "@/services/organizationService";
+import { ROUTE_ROLES } from "@/lib/routeAccess";
+import { getUserProfile, listUsers } from "@/services/organizationService";
 import {
   getVehicle,
   getVehicleInspections,
   getVehicleIssues,
   getVehicleMaintenanceHistory,
   overrideVehicleStatus,
+  reassignVehicle,
+  retireVehicle,
 } from "@/services/vehicleService";
 import { OPEN_ISSUE_STATUSES } from "@/types";
-import type { Inspection, Issue, IssueSeverity, IssueStatus, MaintenanceRecord, UserRole, Vehicle } from "@/types";
+import type { Inspection, Issue, IssueSeverity, IssueStatus, MaintenanceRecord, User, Vehicle } from "@/types";
 
 type Tab = "issues" | "inspections" | "maintenance";
-
-/** Manual vehicle-status override is admin/fleet_manager only — narrower than
- * ROUTE_ROLES.fleet (which also includes supervisor), and not a route gate
- * since this is one control on an otherwise-open page, not a whole route. */
-const MANUAL_OVERRIDE_ROLES: readonly UserRole[] = ["admin", "fleet_manager"];
 
 const SEVERITY_STYLES: Record<IssueSeverity, string> = {
   low: "bg-gray-100 text-gray-700",
@@ -82,6 +80,15 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [overriding, setOverriding] = useState(false);
   const [overrideError, setOverrideError] = useState<string | null>(null);
 
+  const [orgUsers, setOrgUsers] = useState<User[]>([]);
+  const [reassignUserId, setReassignUserId] = useState("");
+  const [reassigning, setReassigning] = useState(false);
+  const [reassignError, setReassignError] = useState<string | null>(null);
+
+  const [showRetireConfirm, setShowRetireConfirm] = useState(false);
+  const [retiring, setRetiring] = useState(false);
+  const [retireError, setRetireError] = useState<string | null>(null);
+
   // Redirect once auth state has resolved and no one is signed in.
   useEffect(() => {
     if (!authLoading && !firebaseUser) {
@@ -119,7 +126,18 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
         return;
       }
       setVehicle(vehicleResult);
+      setReassignUserId(vehicleResult.assignedUserId ?? "");
       setLoadingVehicle(false);
+
+      // Non-fatal — only feeds the reassign picker, which just falls back
+      // to "Unassigned" only if this fails.
+      listUsers(currentUser.organizationId)
+        .then((results) => {
+          if (!cancelled) {
+            setOrgUsers(results);
+          }
+        })
+        .catch(() => {});
 
       setHistoryLoading(true);
       setHistoryError(null);
@@ -186,10 +204,50 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
     }
   }
 
+  async function handleReassign() {
+    if (!user || !vehicle) {
+      return;
+    }
+    setReassigning(true);
+    setReassignError(null);
+    try {
+      await reassignVehicle(user.organizationId, vehicle.id, reassignUserId || null, user.id);
+      setVehicle({ ...vehicle, assignedUserId: reassignUserId || undefined });
+      if (reassignUserId) {
+        const profile = orgUsers.find((u) => u.id === reassignUserId);
+        if (profile) {
+          setUserNames((prev) => ({ ...prev, [reassignUserId]: `${profile.firstName} ${profile.lastName}` }));
+        }
+      }
+    } catch (err) {
+      setReassignError(err instanceof Error ? err.message : "Failed to reassign vehicle.");
+    } finally {
+      setReassigning(false);
+    }
+  }
+
+  async function handleRetire() {
+    if (!user || !vehicle) {
+      return;
+    }
+    setRetiring(true);
+    setRetireError(null);
+    try {
+      await retireVehicle(user.organizationId, vehicle.id, user.id);
+      setVehicle({ ...vehicle, status: "retired" });
+      setShowRetireConfirm(false);
+    } catch (err) {
+      setRetiring(false);
+      setRetireError(err instanceof Error ? err.message : "Failed to retire vehicle.");
+      return;
+    }
+    setRetiring(false);
+  }
+
   const isResolvingAuth = authLoading || !firebaseUser;
   const openIssues = issues.filter((issue) => OPEN_ISSUE_STATUSES.includes(issue.status));
   const lastInspection = inspections[0];
-  const canOverrideStatus = user ? MANUAL_OVERRIDE_ROLES.includes(user.role) : false;
+  const canManageVehicles = user ? ROUTE_ROLES.vehicleManagement.includes(user.role) : false;
 
   return (
     <Layout>
@@ -212,7 +270,17 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
                   {[vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(" ") || "—"}
                 </p>
               </div>
-              <StatusBadge status={vehicle.status} className="mt-1 px-3 py-1 text-sm" />
+              <div className="flex shrink-0 flex-col items-end gap-2">
+                <StatusBadge status={vehicle.status} className="px-3 py-1 text-sm" />
+                {canManageVehicles && (
+                  <Link
+                    href={`/vehicle/${vehicle.id}/edit`}
+                    className="text-xs font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                  >
+                    Edit
+                  </Link>
+                )}
+              </div>
             </div>
 
             {/* Quick stats */}
@@ -227,9 +295,38 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
               </div>
               <div>
                 <dt className="text-xs font-medium uppercase tracking-wide text-gray-400">Assigned Officer</dt>
-                <dd className="mt-0.5 text-sm font-medium text-gray-900">
-                  {vehicle.assignedUserId ? (userNames[vehicle.assignedUserId] ?? "Loading…") : "Unassigned"}
-                </dd>
+                {canManageVehicles ? (
+                  <>
+                    <div className="mt-0.5 flex gap-1.5">
+                      <select
+                        aria-label="Assigned Officer"
+                        value={reassignUserId}
+                        onChange={(event) => setReassignUserId(event.target.value)}
+                        className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="">Unassigned</option>
+                        {orgUsers.map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.firstName} {u.lastName}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={handleReassign}
+                        disabled={reassigning || reassignUserId === (vehicle.assignedUserId ?? "")}
+                        className="shrink-0 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {reassigning ? "Saving…" : "Save"}
+                      </button>
+                    </div>
+                    {reassignError && <p className="mt-1 text-xs text-red-600">{reassignError}</p>}
+                  </>
+                ) : (
+                  <dd className="mt-0.5 text-sm font-medium text-gray-900">
+                    {vehicle.assignedUserId ? (userNames[vehicle.assignedUserId] ?? "Loading…") : "Unassigned"}
+                  </dd>
+                )}
               </div>
               <div>
                 <dt className="text-xs font-medium uppercase tracking-wide text-gray-400">Last Inspection</dt>
@@ -245,12 +342,21 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
 
             {/* Actions */}
             <div className="mt-4 flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row">
-              <Link
-                href={`/inspections/new?vehicleId=${vehicle.id}`}
-                className="flex-1 rounded-md bg-blue-600 px-4 py-3 text-center text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-              >
-                Start Inspection
-              </Link>
+              {vehicle.status === "retired" ? (
+                <span
+                  title="Retired vehicles can't have new inspections started."
+                  className="flex-1 cursor-not-allowed rounded-md bg-gray-100 px-4 py-3 text-center text-sm font-semibold text-gray-400"
+                >
+                  Start Inspection
+                </span>
+              ) : (
+                <Link
+                  href={`/inspections/new?vehicleId=${vehicle.id}`}
+                  className="flex-1 rounded-md bg-blue-600 px-4 py-3 text-center text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                >
+                  Start Inspection
+                </Link>
+              )}
               <Link
                 href={`/vehicle/${vehicle.id}/report-defect`}
                 className="flex-1 rounded-md bg-red-600 px-4 py-3 text-center text-sm font-semibold text-white transition-colors hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
@@ -259,14 +365,17 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
               </Link>
             </div>
 
-            {/* Manual status override — admin/fleet_manager only. Rule 1 of
-                deriveVehicleStatus (functions/src/index.ts) preserves
-                out_of_service/retired until something changes them; this is
-                that "something" for a human pulling a vehicle for a recall
-                or putting it back into service. */}
-            {canOverrideStatus && (
+            {/* Manual actions — admin/fleet_manager only. The status flips
+                are what Rule 1 of deriveVehicleStatus (functions/src/index.ts)
+                means by "manual, human-set state": nothing else can set
+                out_of_service or clear it. Retire is a similar one-way
+                manual state, but distinct enough (permanent-ish, its own
+                audit action, no reverse button) to get its own confirm
+                step. Hidden entirely once retired — nothing here still
+                applies to a permanently decommissioned vehicle. */}
+            {canManageVehicles && vehicle.status !== "retired" && (
               <div className="mt-4 border-t border-gray-100 pt-4">
-                <p className="text-xs font-medium uppercase tracking-wide text-gray-400">Manual Override</p>
+                <p className="text-xs font-medium uppercase tracking-wide text-gray-400">Manual Actions</p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {vehicle.status !== "out_of_service" && (
                     <button
@@ -288,8 +397,45 @@ function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
                       {overriding ? "Updating…" : "Return to Active"}
                     </button>
                   )}
+                  {!showRetireConfirm && (
+                    <button
+                      type="button"
+                      onClick={() => setShowRetireConfirm(true)}
+                      className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100"
+                    >
+                      Retire Vehicle
+                    </button>
+                  )}
                 </div>
                 {overrideError && <p className="mt-2 text-xs text-red-600">{overrideError}</p>}
+
+                {showRetireConfirm && (
+                  <div className="mt-3 rounded-md border border-gray-300 bg-gray-50 p-3">
+                    <p className="text-sm text-gray-700">
+                      Retire Unit {vehicle.unitNumber}? It drops off the default fleet view and can&apos;t have new
+                      inspections started. Its history is kept — there&apos;s no delete.
+                    </p>
+                    {retireError && <p className="mt-2 text-xs text-red-600">{retireError}</p>}
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowRetireConfirm(false)}
+                        disabled={retiring}
+                        className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Never mind
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRetire}
+                        disabled={retiring}
+                        className="rounded-md bg-gray-700 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {retiring ? "Retiring…" : "Confirm Retire"}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

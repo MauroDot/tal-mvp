@@ -79,7 +79,16 @@ service cloud.firestore {
 
       match /vehicles/{vehicleId} {
         allow read: if isOrgMember(orgId);
-        allow write: if hasRole(orgId, ['admin', 'fleet_manager']);
+        // create/update cover everything the vehicle management UI does
+        // (add, edit, retire, reassign — see vehicleService.ts) — already
+        // correct for this, no change needed there. delete is split out
+        // and denied outright: the UI deliberately never offers it
+        // ("retire" sets status, it doesn't remove the document) because
+        // a department needs the inspection/maintenance history, and that
+        // needs to hold even against a direct API call, not just rely on
+        // no button existing for it.
+        allow create, update: if hasRole(orgId, ['admin', 'fleet_manager']);
+        allow delete: if false;
       }
 
       match /equipment/{equipmentId} {
