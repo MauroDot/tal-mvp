@@ -286,6 +286,10 @@ export interface TemplateItem {
   responseType: InspectionItemResponseType;
   /** Whether a response to this item is mandatory to complete the inspection. */
   isRequired: boolean;
+  /** Whether passing/answering this item also requires attaching a photo as evidence. */
+  requiresPhoto: boolean;
+  /** Whether passing/answering this item also requires a free-text note. */
+  requiresNote: boolean;
   /** Whether a failed/out-of-range response should automatically create an Issue. */
   autoCreateIssueOnFail: boolean;
   /** For `responseType: "numeric"`, the minimum acceptable value. */
@@ -345,8 +349,8 @@ export interface InspectionItemResult {
   numericValue?: number;
   /** Free-text response/notes for this item. */
   textValue?: string;
-  /** Photo URLs captured as evidence for this item. */
-  photoUrls?: string[];
+  /** IDs of photos captured as evidence for this item (see `uploadInspectionPhoto`); resolve to display URLs at render time. */
+  photoIds?: string[];
   /** ID of the Issue auto-created or linked as a result of this response, if any. */
   issueId?: string;
   /** When this specific item was answered. */
@@ -419,8 +423,8 @@ export interface Issue {
   reportedByUserId: string;
   /** User currently responsible for resolving the issue, if assigned. */
   assignedToUserId?: string;
-  /** Photo URLs documenting the issue. */
-  photoUrls?: string[];
+  /** IDs of photos documenting the issue (see `uploadInspectionPhoto`); resolve to display URLs at render time. */
+  photoIds?: string[];
   /** WorkOrder created to resolve this issue, if any. */
   workOrderId?: string;
   /** Notes added when the issue was resolved (root cause, fix applied, etc.). */

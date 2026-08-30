@@ -36,10 +36,15 @@ export function useAuth(): UseAuthResult {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      console.log(
+        "[useAuth] onAuthStateChanged fired:",
+        fbUser ? { uid: fbUser.uid, email: fbUser.email } : null
+      );
       setFirebaseUser(fbUser);
       setError(null);
 
       if (!fbUser) {
+        console.log("[useAuth] No Firebase user — clearing profile, done.");
         setUser(null);
         setLoading(false);
         return;
@@ -47,10 +52,36 @@ export function useAuth(): UseAuthResult {
 
       setLoading(true);
       try {
+        console.log(`[useAuth] Step 1: resolving org via userOrgs/${fbUser.uid} ...`);
         const orgId = await getUserOrgId(fbUser.uid);
+        console.log(`[useAuth] Step 1 result: orgId =`, orgId);
+
+        if (!orgId) {
+          console.warn(
+            `[useAuth] No userOrgs/${fbUser.uid} document (or it has no organizationId field) — ` +
+              `cannot resolve which org this user belongs to, so the profile fetch is being skipped. ` +
+              `Create a document at userOrgs/${fbUser.uid} with { organizationId: "<orgId>" } to fix this.`
+          );
+        }
+
+        console.log(
+          orgId
+            ? `[useAuth] Step 2: fetching organizations/${orgId}/users/${fbUser.uid} ...`
+            : "[useAuth] Step 2: skipped (no orgId from step 1)."
+        );
         const profile = orgId ? await getUserProfile(orgId, fbUser.uid) : null;
+        console.log("[useAuth] Step 2 result: profile =", profile);
+
+        if (orgId && !profile) {
+          console.warn(
+            `[useAuth] Org resolved to "${orgId}", but organizations/${orgId}/users/${fbUser.uid} ` +
+              `doesn't exist. The org lookup is fine — this user just has no profile doc under it yet.`
+          );
+        }
+
         setUser(profile);
       } catch (err) {
+        console.error("[useAuth] Failed while resolving org/profile:", err);
         setUser(null);
         setError(err instanceof Error ? err : new Error("Failed to load user profile"));
       } finally {

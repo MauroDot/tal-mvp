@@ -25,7 +25,8 @@ import {
 import { ref, uploadBytes } from "firebase/storage";
 import { v4 as uuidv4 } from "uuid";
 import { db, storage } from "../lib/firebase";
-import type { AssetType, Inspection, InspectionItemResult, IssueSeverity } from "../types";
+import { convertTimestamps, stripUndefined } from "../lib/firestoreUtils";
+import type { AssetType, Inspection, InspectionItemResult, InspectionTemplate, IssueSeverity } from "../types";
 
 /**
  * Shape of an inspection item response as supplied by the caller of
@@ -51,6 +52,26 @@ async function resolveAssetType(orgId: string, assetId: string): Promise<AssetTy
     return "equipment";
   }
   throw new Error(`Asset ${assetId} not found in organization ${orgId}`);
+}
+
+/**
+ * Fetches an InspectionTemplate by ID from
+ * `organizations/{orgId}/inspectionTemplates/{templateId}`. Returns `null`
+ * if no such document exists.
+ */
+export async function getInspectionTemplate(
+  orgId: string,
+  templateId: string
+): Promise<InspectionTemplate | null> {
+  const snapshot = await getDoc(doc(db, "organizations", orgId, "inspectionTemplates", templateId));
+  if (!snapshot.exists()) {
+    return null;
+  }
+  return convertTimestamps<InspectionTemplate>({
+    id: snapshot.id,
+    organizationId: orgId,
+    ...snapshot.data(),
+  });
 }
 
 /**
@@ -91,6 +112,13 @@ export async function startInspection(
  * `respondedAt` where omitted) on each item, derives `overallResult` from
  * whether any item failed without an attached issue, collects
  * `issueIds` from the items, and sets `completedAt`.
+ *
+ * Every item, and the inspection update itself, is passed through
+ * `stripUndefined` before being written — Firestore rejects `undefined`
+ * field values outright (`setDoc`/`updateDoc` throw, including for
+ * `undefined` inside array elements like `items`), and callers routinely
+ * have optional fields (a note that wasn't required, a photo that wasn't
+ * taken) resolve to `undefined` rather than an empty value.
  */
 export async function completeInspection(
   orgId: string,
@@ -98,12 +126,19 @@ export async function completeInspection(
   items: InspectionItemInput[]
 ): Promise<void> {
   const now = new Date().toISOString();
-  const fullItems: InspectionItemResult[] = items.map((item) => ({
-    ...item,
-    id: uuidv4(),
-    inspectionId,
-    respondedAt: item.respondedAt ?? now,
-  }));
+  const fullItems: InspectionItemResult[] = items.map((item) =>
+    stripUndefined({
+      ...item,
+      id: uuidv4(),
+      inspectionId,
+      // Always a string — an empty note is fine to store, `undefined` is not.
+      textValue: item.textValue ?? "",
+      // Omitted (via stripUndefined below) rather than written as `[]`
+      // when no photo was actually uploaded.
+      photoIds: item.photoIds && item.photoIds.length > 0 ? item.photoIds : undefined,
+      respondedAt: item.respondedAt ?? now,
+    })
+  );
 
   const issueIds = Array.from(
     new Set(fullItems.map((item) => item.issueId).filter((id): id is string => Boolean(id)))
@@ -120,12 +155,15 @@ export async function completeInspection(
       ? "pass_with_issues"
       : "pass";
 
-  await updateDoc(doc(db, "organizations", orgId, "inspections", inspectionId), {
-    items: fullItems,
-    issueIds,
-    overallResult,
-    completedAt: serverTimestamp(),
-  });
+  await updateDoc(
+    doc(db, "organizations", orgId, "inspections", inspectionId),
+    stripUndefined({
+      items: fullItems,
+      issueIds,
+      overallResult,
+      completedAt: serverTimestamp(),
+    })
+  );
 }
 
 /**
@@ -157,8 +195,7 @@ export async function uploadInspectionPhoto(
  * `organizations/{orgId}/issues` document with `status: "open"` and
  * returns its ID. `photoIds` are IDs previously returned by
  * `uploadInspectionPhoto` — resolve them to display URLs (via
- * `getDownloadURL` against the same storage path) when rendering, rather
- * than storing resolved URLs on the issue itself.
+ * `getDownloadURL` against the same storage path) when rendering.
  */
 export async function submitDefect(
   orgId: string,

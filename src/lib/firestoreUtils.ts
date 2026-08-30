@@ -17,3 +17,21 @@ export function convertTimestamps<T>(data: DocumentData): T {
   }
   return result as T;
 }
+
+/**
+ * Returns a shallow copy of `obj` with every key whose value is
+ * `undefined` removed. Firestore rejects `undefined` field values outright
+ * in `setDoc`/`updateDoc` — including inside array elements, where there's
+ * no `ignoreUndefinedProperties`-style setting to fall back on — so any
+ * object built from optional or possibly-empty inputs should be passed
+ * through this immediately before being written.
+ */
+export function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+  const result = {} as T;
+  for (const key of Object.keys(obj) as Array<keyof T>) {
+    if (obj[key] !== undefined) {
+      result[key] = obj[key];
+    }
+  }
+  return result;
+}
