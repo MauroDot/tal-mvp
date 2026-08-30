@@ -124,6 +124,29 @@ export async function getVehicleInspections(
 }
 
 /**
+ * Fetches a vehicle's most recently *completed* inspection. Orders by
+ * `completedAt` (not `startedAt`), which naturally excludes
+ * abandoned/in-progress inspections — Firestore's `orderBy` skips
+ * documents missing that field entirely — so this never returns one with
+ * no `overallResult`. Returns `null` if no inspection has ever completed.
+ */
+export async function getLatestCompletedInspection(orgId: string, vehicleId: string): Promise<Inspection | null> {
+  const q = query(
+    collection(db, "organizations", orgId, "inspections"),
+    where("assetType", "==", "vehicle"),
+    where("assetId", "==", vehicleId),
+    orderBy("completedAt", "desc"),
+    limitQuery(1)
+  );
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) {
+    return null;
+  }
+  const doc = snapshot.docs[0];
+  return convertTimestamps<Inspection>({ id: doc.id, ...doc.data() });
+}
+
+/**
  * Fetches all issues reported against a vehicle, newest first.
  */
 export async function getVehicleIssues(orgId: string, vehicleId: string): Promise<Issue[]> {

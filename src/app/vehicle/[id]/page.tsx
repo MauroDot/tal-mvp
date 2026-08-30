@@ -9,12 +9,12 @@
  * the calling component (same reasoning as report-defect/page.tsx).
  */
 import { Suspense, use, useEffect, useState } from "react";
-import { format } from "date-fns";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { useAuth } from "@/hooks/useAuth";
+import { formatDate } from "@/lib/dateUtils";
 import { getUserProfile } from "@/services/organizationService";
 import {
   getVehicle,
@@ -22,6 +22,7 @@ import {
   getVehicleIssues,
   getVehicleMaintenanceHistory,
 } from "@/services/vehicleService";
+import { OPEN_ISSUE_STATUSES } from "@/types";
 import type { Inspection, Issue, IssueSeverity, IssueStatus, MaintenanceRecord, Vehicle } from "@/types";
 
 type Tab = "issues" | "inspections" | "maintenance";
@@ -52,19 +53,6 @@ const RESULT_LABELS: Record<Inspection["overallResult"], string> = {
   fail: "Fail",
   pass_with_issues: "Pass w/ Issues",
 };
-
-const OPEN_ISSUE_STATUSES: IssueStatus[] = ["open", "acknowledged", "in_progress"];
-
-function formatDate(value?: string): string {
-  if (!value) {
-    return "—";
-  }
-  try {
-    return format(new Date(value), "MMM d, yyyy");
-  } catch {
-    return value;
-  }
-}
 
 function VehicleDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: vehicleId } = use(params);

@@ -46,6 +46,9 @@ export type IssueStatus =
   | "resolved" // Fix completed, pending verification
   | "closed"; // Verified and closed out, no further action needed
 
+/** `IssueStatus` values that count as "still open" — not yet resolved or closed. */
+export const OPEN_ISSUE_STATUSES: readonly IssueStatus[] = ["open", "acknowledged", "in_progress"];
+
 /** Lifecycle state of a WorkOrder. */
 export type WorkOrderStatus =
   | "draft" // Created but not yet submitted/scheduled
