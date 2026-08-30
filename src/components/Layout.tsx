@@ -25,6 +25,7 @@ export default function Layout({ children }: LayoutProps) {
   const canSeeFleetNav = user ? ROUTE_ROLES.fleet.includes(user.role) : false;
   const canSeeWorkOrdersNav = user ? ROUTE_ROLES.workOrders.includes(user.role) : false;
   const canSeeTemplatesNav = user ? ROUTE_ROLES.templates.includes(user.role) : false;
+  const canSeeUsersNav = user ? ROUTE_ROLES.users.includes(user.role) : false;
 
   const handleLogout = async () => {
     try {
@@ -48,7 +49,7 @@ export default function Layout({ children }: LayoutProps) {
               </span>
             </Link>
 
-            {(canSeeFleetNav || canSeeWorkOrdersNav || canSeeTemplatesNav) && (
+            {(canSeeFleetNav || canSeeWorkOrdersNav || canSeeTemplatesNav || canSeeUsersNav) && (
               <nav className="hidden gap-4 sm:flex">
                 {canSeeFleetNav && (
                   <Link href="/fleet" className="text-sm font-medium text-gray-600 hover:text-blue-700">
@@ -63,6 +64,11 @@ export default function Layout({ children }: LayoutProps) {
                 {canSeeTemplatesNav && (
                   <Link href="/admin/templates" className="text-sm font-medium text-gray-600 hover:text-blue-700">
                     Templates
+                  </Link>
+                )}
+                {canSeeUsersNav && (
+                  <Link href="/admin/users" className="text-sm font-medium text-gray-600 hover:text-blue-700">
+                    Users
                   </Link>
                 )}
               </nav>

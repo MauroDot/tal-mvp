@@ -10,6 +10,7 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
+import { getFunctions, type Functions } from "firebase/functions";
 import { getStorage, type FirebaseStorage } from "firebase/storage";
 
 const firebaseConfig = {
@@ -28,5 +29,9 @@ const app: FirebaseApp = getApps().length ? getApp() : initializeApp(firebaseCon
 export const auth: Auth = getAuth(app);
 export const db: Firestore = getFirestore(app);
 export const storage: FirebaseStorage = getStorage(app);
+// No region passed — matches the Cloud Functions' own default
+// (functions/src/index.ts doesn't call `.region(...)` on any export), so
+// this resolves to the same us-central1 default on both sides.
+export const functionsInstance: Functions = getFunctions(app);
 
 export default app;

@@ -69,8 +69,39 @@ export function useAuth(): UseAuthResult {
             ? `[useAuth] Step 2: fetching organizations/${orgId}/users/${fbUser.uid} ...`
             : "[useAuth] Step 2: skipped (no orgId from step 1)."
         );
-        const profile = orgId ? await getUserProfile(orgId, fbUser.uid) : null;
-        console.log("[useAuth] Step 2 result: profile =", profile);
+        let profile: User | null = null;
+        try {
+          profile = orgId ? await getUserProfile(orgId, fbUser.uid) : null;
+          console.log("[useAuth] Step 2 result: profile =", profile);
+        } catch (profileErr) {
+          // A permission-denied here, specifically on reading one's OWN
+          // profile, can only mean firestore.rules' isOrgMember rejected
+          // it — which (barring the doc being deleted outright) means
+          // isActive is false: deactivateOrgUser (functions/src/index.ts)
+          // flips that flag, and rules re-check it on every request, so
+          // this is the enforcement that actually blocks a
+          // still-signed-in session immediately, not just future sign-ins
+          // (see firestore.rules' isOrgMember comment). Treat it as
+          // "no access" and sign out, rather than surfacing a generic
+          // Firestore error while leaving them in a half-signed-in state.
+          // Any OTHER error code (network blip, etc.) falls through to
+          // the outer catch instead — that one doesn't sign out, so a
+          // transient failure doesn't destroy a perfectly good session.
+          if ((profileErr as { code?: string })?.code !== "permission-denied") {
+            throw profileErr;
+          }
+          console.warn(
+            `[useAuth] Reading own profile at organizations/${orgId}/users/${fbUser.uid} was denied — ` +
+              "treating as deactivated/no-access and signing out.",
+            profileErr
+          );
+          await signOut();
+          setFirebaseUser(null);
+          setUser(null);
+          setError(new Error("Your account doesn't have access to this organization. Contact your administrator."));
+          setLoading(false);
+          return;
+        }
 
         if (orgId && !profile) {
           console.warn(

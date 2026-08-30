@@ -27,9 +27,25 @@ service cloud.firestore {
     // below that touches organizations/{orgId}/** goes through this (or
     // hasRole, which implies it), which is what stops an org-A user from
     // reading org-B's data by changing the orgId in a request.
+    //
+    // Also requires isActive == true on that profile. This is what makes
+    // deactivation (functions/src/index.ts, deactivateOrgUser) actually
+    // block access rather than merely hide the user from a list: rules
+    // are re-evaluated on every single request, so the moment a profile's
+    // isActive flips to false, every read/write this function gates
+    // starts failing immediately — no waiting on an Auth token to expire.
+    // deactivateOrgUser also disables the Firebase Auth account and
+    // revokes its refresh tokens, which blocks new sign-ins and forces an
+    // already-open session to fail its next token refresh, but that alone
+    // has a real gap: a still-valid ID token issued before deactivation
+    // keeps working, by design, for up to its ~1hr lifetime unless
+    // something re-checks isActive on every request the way this does.
+    // The two together are belt-and-suspenders; this check is the one
+    // that's actually immediate.
     function isOrgMember(orgId) {
       return signedIn() &&
-        exists(/databases/$(database)/documents/organizations/$(orgId)/users/$(request.auth.uid));
+        exists(/databases/$(database)/documents/organizations/$(orgId)/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/organizations/$(orgId)/users/$(request.auth.uid)).data.isActive == true;
     }
 
     // Only valid to call where isOrgMember(orgId) is already known true

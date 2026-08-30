@@ -15,6 +15,7 @@ export const ROUTE_ROLES: {
   workOrders: UserRole[];
   vehicleManagement: UserRole[];
   templates: UserRole[];
+  users: UserRole[];
 } = {
   fleet: ["admin", "fleet_manager", "supervisor"],
   // Same role set as fleet today (and matches the workOrders/issues-update
@@ -33,4 +34,8 @@ export const ROUTE_ROLES: {
   // (admin only — not even fleet_manager). Gates /admin/templates and its
   // new/edit subroutes.
   templates: ["admin"],
+  // Admin only — matches who assertActiveOrgAdmin (functions/src/index.ts)
+  // actually lets call inviteOrgUser/changeOrgUserRole/deactivateOrgUser/
+  // reactivateOrgUser. Gates /admin/users and its invite subroute.
+  users: ["admin"],
 };

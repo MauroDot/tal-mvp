@@ -88,6 +88,14 @@ async function seedFixtures(): Promise<void> {
       organizationId: ORG_A,
       isActive: true,
     });
+    await setDoc(doc(db, "organizations", ORG_A, "users", "inactive-a"), {
+      email: "inactive-a@example.com",
+      firstName: "Inactive",
+      lastName: "A",
+      role: "officer",
+      organizationId: ORG_A,
+      isActive: false,
+    });
     await setDoc(doc(db, "organizations", ORG_B, "users", "officer-b"), {
       email: "officer-b@example.com",
       firstName: "Officer",
@@ -100,6 +108,7 @@ async function seedFixtures(): Promise<void> {
     await setDoc(doc(db, "userOrgs", "officer-a"), { organizationId: ORG_A, email: "officer-a@example.com" });
     await setDoc(doc(db, "userOrgs", "manager-a"), { organizationId: ORG_A, email: "manager-a@example.com" });
     await setDoc(doc(db, "userOrgs", "admin-a"), { organizationId: ORG_A, email: "admin-a@example.com" });
+    await setDoc(doc(db, "userOrgs", "inactive-a"), { organizationId: ORG_A, email: "inactive-a@example.com" });
     await setDoc(doc(db, "userOrgs", "officer-b"), { organizationId: ORG_B, email: "officer-b@example.com" });
 
     await setDoc(doc(db, "organizations", ORG_A, "vehicles", "vehicle-a1"), {
@@ -153,6 +162,23 @@ describe("multi-tenant boundary", () => {
   it("allows an org-A user to read an org-A vehicle (sanity check the boundary isn't just denying everything)", async () => {
     const officerA = ctxFor("officer-a");
     await assertSucceeds(getDoc(doc(officerA, "organizations", ORG_A, "vehicles", "vehicle-a1")));
+  });
+});
+
+describe("isOrgMember requires isActive:true — deactivation blocks access immediately, not just future sign-ins", () => {
+  it("denies a deactivated user reading their own org's vehicle, even though their profile doc exists", async () => {
+    const inactiveA = ctxFor("inactive-a");
+    await assertFails(getDoc(doc(inactiveA, "organizations", ORG_A, "vehicles", "vehicle-a1")));
+  });
+
+  it("denies a deactivated user reading their own profile", async () => {
+    const inactiveA = ctxFor("inactive-a");
+    await assertFails(getDoc(doc(inactiveA, "organizations", ORG_A, "users", "inactive-a")));
+  });
+
+  it("allows an active admin to still read a deactivated user's profile (the user list needs this)", async () => {
+    const adminA = ctxFor("admin-a");
+    await assertSucceeds(getDoc(doc(adminA, "organizations", ORG_A, "users", "inactive-a")));
   });
 });
 

@@ -43,6 +43,7 @@
  * firestore.indexes.json.
  */
 import { initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp, FieldValue, type Transaction } from "firebase-admin/firestore";
 import * as functions from "firebase-functions/v1";
 import * as logger from "firebase-functions/logger";
@@ -50,6 +51,7 @@ import * as logger from "firebase-functions/logger";
 initializeApp();
 
 const db = getFirestore();
+const adminAuth = getAuth();
 
 type AssetType = "vehicle" | "equipment";
 type AssetStatus = "ready" | "attention" | "maintenance_required" | "out_of_service" | "retired" | "unknown";
@@ -609,3 +611,410 @@ export const checkEquipmentExpiration = functions.pubsub
     });
     return null;
   });
+
+// ---------------------------------------------------------------------------
+// 5. User management (admin-only callables)
+// ---------------------------------------------------------------------------
+//
+// firestore.rules denies every client write to
+// organizations/{orgId}/users outright (a user editing their own `role`
+// field would be a privilege-escalation hole) — these four callables are
+// the only way that collection, and its userOrgs/{uid} lookup
+// counterpart, ever get written from outside a script. Each one
+// re-derives the caller's own org membership and role server-side via
+// assertActiveOrgAdmin: an orgId supplied by the client is never
+// trusted, only ever looked up from the caller's own uid.
+
+type UserRole = "admin" | "fleet_manager" | "equipment_manager" | "supervisor" | "officer" | "readonly";
+const USER_ROLES: UserRole[] = ["admin", "fleet_manager", "equipment_manager", "supervisor", "officer", "readonly"];
+
+/** Mirrors `User` in the web app's `src/types`, restricted to the fields these callables actually read. */
+interface UserDoc {
+  role: UserRole;
+  isActive: boolean;
+}
+
+interface CallerContext {
+  callerUid: string;
+  orgId: string;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Verifies the caller is signed in and is an *active* admin of *some*
+ * org, and returns that org's id — resolved entirely server-side from
+ * the caller's own uid (userOrgs/{uid} -> organizations/{orgId}/users/{uid}),
+ * never from a client-supplied orgId. Throws HttpsError otherwise.
+ */
+async function assertActiveOrgAdmin(context: functions.https.CallableContext): Promise<CallerContext> {
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "Sign in required.");
+  }
+  const callerUid = context.auth.uid;
+
+  const userOrgSnap = await db.doc(`userOrgs/${callerUid}`).get();
+  const orgId = userOrgSnap.exists ? (userOrgSnap.data()?.organizationId as string | undefined) : undefined;
+  if (!orgId) {
+    throw new functions.https.HttpsError("permission-denied", "Caller has no organization membership.");
+  }
+
+  const callerSnap = await db.doc(`organizations/${orgId}/users/${callerUid}`).get();
+  const caller = callerSnap.data() as UserDoc | undefined;
+  if (!callerSnap.exists || caller?.role !== "admin" || caller?.isActive !== true) {
+    throw new functions.https.HttpsError("permission-denied", "Caller is not an active admin of this organization.");
+  }
+
+  return { callerUid, orgId };
+}
+
+/**
+ * Every *other* currently-active admin in the org besides `excludeUid` —
+ * used to guard the "last active admin can't be demoted/deactivated"
+ * safeguard. Two equality filters (role, isActive), no orderBy —
+ * Firestore serves this off its automatic single-field indexes via an
+ * index merge, no composite index needed.
+ */
+async function countOtherActiveAdmins(orgId: string, excludeUid: string): Promise<number> {
+  const snap = await db
+    .collection(`organizations/${orgId}/users`)
+    .where("role", "==", "admin")
+    .where("isActive", "==", true)
+    .get();
+  return snap.docs.filter((d) => d.id !== excludeUid).length;
+}
+
+// ---- inviteOrgUser ---------------------------------------------------------
+
+interface InviteOrgUserData {
+  email: string;
+  firstName: string;
+  lastName: string;
+  role: UserRole;
+}
+
+/**
+ * Creates a new user: a Firebase Auth account, their
+ * organizations/{orgId}/users profile, and the matching userOrgs/{uid}
+ * lookup. Admin-only, and only for the caller's own org (see
+ * assertActiveOrgAdmin) — never trusts an orgId from the client.
+ *
+ * Deliberately does NOT send the password-reset email itself: the Admin
+ * SDK can generate a reset *link* (`generatePasswordResetLink`) but has
+ * no way to actually deliver an email — sending one is exclusively a
+ * client SDK capability (`sendPasswordResetEmail`), by Firebase's own
+ * design (self-service reset flows originate client-side). The web app's
+ * invite form calls `sendPasswordResetEmail` immediately after this
+ * function returns success (see userManagementService.ts), which is what
+ * actually sends the real email via Firebase's built-in delivery
+ * (Console -> Authentication -> Templates controls its content). If that
+ * follow-up call fails, the account and profile still exist — the admin
+ * can tell the invitee to use "Forgot password" on the login page
+ * instead, which is the exact same underlying mechanism.
+ */
+export const inviteOrgUser = functions.https.onCall(async (data: InviteOrgUserData, context) => {
+  const { orgId, callerUid } = await assertActiveOrgAdmin(context);
+
+  const email = isNonEmptyString(data?.email) ? data.email.trim().toLowerCase() : "";
+  const firstName = isNonEmptyString(data?.firstName) ? data.firstName.trim() : "";
+  const lastName = isNonEmptyString(data?.lastName) ? data.lastName.trim() : "";
+  const role = data?.role;
+
+  if (!email || !email.includes("@")) {
+    throw new functions.https.HttpsError("invalid-argument", "A valid email is required.");
+  }
+  if (!firstName || !lastName) {
+    throw new functions.https.HttpsError("invalid-argument", "First and last name are required.");
+  }
+  if (!USER_ROLES.includes(role)) {
+    throw new functions.https.HttpsError("invalid-argument", `role must be one of: ${USER_ROLES.join(", ")}`);
+  }
+
+  let existing;
+  try {
+    existing = await adminAuth.getUserByEmail(email);
+  } catch (err) {
+    if ((err as { code?: string })?.code !== "auth/user-not-found") {
+      logger.error("inviteOrgUser: unexpected error checking for an existing account", err);
+      throw new functions.https.HttpsError("internal", "Failed to check for an existing account.");
+    }
+  }
+  if (existing) {
+    throw new functions.https.HttpsError("already-exists", `A user with email ${email} already exists.`);
+  }
+
+  let userRecord;
+  try {
+    userRecord = await adminAuth.createUser({ email, displayName: `${firstName} ${lastName}`, emailVerified: false });
+  } catch (err) {
+    logger.error("inviteOrgUser: auth.createUser failed", err);
+    throw new functions.https.HttpsError("internal", "Failed to create the Auth account.");
+  }
+
+  const now = Timestamp.now();
+  try {
+    const batch = db.batch();
+    batch.set(db.doc(`organizations/${orgId}/users/${userRecord.uid}`), {
+      organizationId: orgId,
+      email,
+      firstName,
+      lastName,
+      role,
+      isActive: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    batch.set(db.doc(`userOrgs/${userRecord.uid}`), { organizationId: orgId, email });
+    batch.set(db.collection(`organizations/${orgId}/auditLogs`).doc(), {
+      organizationId: orgId,
+      action: "user_invited",
+      entityType: "user",
+      entityId: userRecord.uid,
+      performedBy: callerUid,
+      metadata: { email, role },
+      timestamp: now,
+    });
+    await batch.commit();
+  } catch (err) {
+    // Don't leave an orphaned Auth account with no profile if the
+    // Firestore writes fail after it was already created.
+    logger.error("inviteOrgUser: Firestore write failed after Auth account creation — rolling back", err);
+    await adminAuth.deleteUser(userRecord.uid).catch((cleanupErr) => {
+      logger.error(`inviteOrgUser: rollback also failed — Auth account ${userRecord.uid} is now orphaned`, cleanupErr);
+    });
+    throw new functions.https.HttpsError("internal", "Failed to create the user profile.");
+  }
+
+  return { uid: userRecord.uid, email };
+});
+
+// ---- changeOrgUserRole ------------------------------------------------------
+
+interface ChangeOrgUserRoleData {
+  targetUid: string;
+  newRole: UserRole;
+}
+
+/**
+ * Changes another user's role. Two safeguards, both server-enforced
+ * (the client UI also disables the relevant controls, but this is what
+ * actually stops it):
+ *  - An admin can't change their own role at all — targetUid === caller
+ *    is rejected outright, regardless of what newRole is.
+ *  - Demoting the org's last *active* admin away from "admin" is
+ *    rejected — that would leave nobody able to manage users, change
+ *    roles, or write inspectionTemplates.
+ */
+export const changeOrgUserRole = functions.https.onCall(async (data: ChangeOrgUserRoleData, context) => {
+  const { orgId, callerUid } = await assertActiveOrgAdmin(context);
+
+  const targetUid = isNonEmptyString(data?.targetUid) ? data.targetUid : "";
+  const newRole = data?.newRole;
+  if (!targetUid) {
+    throw new functions.https.HttpsError("invalid-argument", "targetUid is required.");
+  }
+  if (!USER_ROLES.includes(newRole)) {
+    throw new functions.https.HttpsError("invalid-argument", `newRole must be one of: ${USER_ROLES.join(", ")}`);
+  }
+  if (targetUid === callerUid) {
+    throw new functions.https.HttpsError("failed-precondition", "You can't change your own role.");
+  }
+
+  const targetRef = db.doc(`organizations/${orgId}/users/${targetUid}`);
+  const targetSnap = await targetRef.get();
+  if (!targetSnap.exists) {
+    throw new functions.https.HttpsError("not-found", "User not found in this organization.");
+  }
+  const target = targetSnap.data() as UserDoc;
+
+  const isDemotingAnActiveAdmin = target.role === "admin" && target.isActive === true && newRole !== "admin";
+  if (isDemotingAnActiveAdmin && (await countOtherActiveAdmins(orgId, targetUid)) === 0) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "This is the last active admin in the organization — promote another admin first."
+    );
+  }
+
+  const now = Timestamp.now();
+  const batch = db.batch();
+  batch.update(targetRef, { role: newRole, updatedAt: now });
+  batch.set(db.collection(`organizations/${orgId}/auditLogs`).doc(), {
+    organizationId: orgId,
+    action: "user_role_changed",
+    entityType: "user",
+    entityId: targetUid,
+    performedBy: callerUid,
+    metadata: { previousRole: target.role, newRole },
+    timestamp: now,
+  });
+  await batch.commit();
+
+  return { uid: targetUid, role: newRole };
+});
+
+// ---- deactivateOrgUser / reactivateOrgUser ----------------------------------
+
+interface TargetUserData {
+  targetUid: string;
+}
+
+/**
+ * Deactivates a user: blocks sign-in (not just hides them). Two things
+ * happen, in this order and for this reason:
+ *  1. `organizations/{orgId}/users/{targetUid}.isActive` is set to
+ *     false, first. firestore.rules' `isOrgMember` checks this field on
+ *     *every* request, so this is what takes effect immediately, even
+ *     for a session with an ID token that hasn't expired yet.
+ *  2. The Firebase Auth account is disabled and its refresh tokens are
+ *     revoked, best-effort. This blocks any *new* sign-in outright and
+ *     forces an already-open session to fail its next token refresh
+ *     rather than riding out its full lifetime — real hardening, but
+ *     secondary: if this step fails, the user is already fully blocked
+ *     by step 1, so a failure here is logged rather than rolled back or
+ *     surfaced as the whole operation failing.
+ *
+ * Refuses to deactivate the org's last active admin — see
+ * countOtherActiveAdmins.
+ */
+export const deactivateOrgUser = functions.https.onCall(async (data: TargetUserData, context) => {
+  const { orgId, callerUid } = await assertActiveOrgAdmin(context);
+
+  const targetUid = isNonEmptyString(data?.targetUid) ? data.targetUid : "";
+  if (!targetUid) {
+    throw new functions.https.HttpsError("invalid-argument", "targetUid is required.");
+  }
+
+  const targetRef = db.doc(`organizations/${orgId}/users/${targetUid}`);
+  const targetSnap = await targetRef.get();
+  if (!targetSnap.exists) {
+    throw new functions.https.HttpsError("not-found", "User not found in this organization.");
+  }
+  const target = targetSnap.data() as UserDoc;
+
+  if (target.role === "admin" && target.isActive === true && (await countOtherActiveAdmins(orgId, targetUid)) === 0) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "This is the last active admin in the organization — promote another admin before deactivating this one."
+    );
+  }
+
+  const now = Timestamp.now();
+  const batch = db.batch();
+  batch.update(targetRef, { isActive: false, updatedAt: now });
+  batch.set(db.collection(`organizations/${orgId}/auditLogs`).doc(), {
+    organizationId: orgId,
+    action: "user_deactivated",
+    entityType: "user",
+    entityId: targetUid,
+    performedBy: callerUid,
+    metadata: { role: target.role },
+    timestamp: now,
+  });
+  await batch.commit();
+
+  try {
+    await adminAuth.updateUser(targetUid, { disabled: true });
+    await adminAuth.revokeRefreshTokens(targetUid);
+  } catch (err) {
+    logger.error(`deactivateOrgUser: Firestore updated but Auth disable/revoke failed for ${targetUid}`, err);
+  }
+
+  return { uid: targetUid };
+});
+
+/**
+ * Reactivates a user. No "last admin" restriction — reactivating only
+ * ever increases the org's active-admin count, never decreases it.
+ *
+ * Order is deliberately the opposite of deactivateOrgUser: the Auth
+ * account is re-enabled *first*, and the whole call fails if that fails.
+ * Setting isActive:true in Firestore before confirming the Auth account
+ * is actually re-enabled would produce a confusing "active but still
+ * can't sign in" state; failing closed here avoids that.
+ */
+export const reactivateOrgUser = functions.https.onCall(async (data: TargetUserData, context) => {
+  const { orgId, callerUid } = await assertActiveOrgAdmin(context);
+
+  const targetUid = isNonEmptyString(data?.targetUid) ? data.targetUid : "";
+  if (!targetUid) {
+    throw new functions.https.HttpsError("invalid-argument", "targetUid is required.");
+  }
+
+  const targetRef = db.doc(`organizations/${orgId}/users/${targetUid}`);
+  const targetSnap = await targetRef.get();
+  if (!targetSnap.exists) {
+    throw new functions.https.HttpsError("not-found", "User not found in this organization.");
+  }
+
+  try {
+    await adminAuth.updateUser(targetUid, { disabled: false });
+  } catch (err) {
+    // auth/user-not-found means this profile is orphaned — its uid was
+    // never a real Auth account (a stale placeholder from an old seed
+    // run) or the account has since been deleted from Auth. That's a
+    // distinct, expected-to-happen situation, not an unexpected server
+    // failure: surface it as such (failed-precondition, a clear message)
+    // rather than letting it fall through to a generic 500. See
+    // setup-demo.ts's --reset for how these get cleaned up.
+    if ((err as { code?: string })?.code === "auth/user-not-found") {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "This profile has no corresponding Firebase Auth account — it can't be reactivated. " +
+          "It's orphaned (likely from a past seed/migration mistake); delete the profile instead of reactivating it."
+      );
+    }
+    logger.error(`reactivateOrgUser: Auth re-enable failed for ${targetUid}`, err);
+    throw new functions.https.HttpsError("internal", "Failed to re-enable the Auth account.");
+  }
+
+  const now = Timestamp.now();
+  const batch = db.batch();
+  batch.update(targetRef, { isActive: true, updatedAt: now });
+  batch.set(db.collection(`organizations/${orgId}/auditLogs`).doc(), {
+    organizationId: orgId,
+    action: "user_reactivated",
+    entityType: "user",
+    entityId: targetUid,
+    performedBy: callerUid,
+    metadata: {},
+    timestamp: now,
+  });
+  await batch.commit();
+
+  return { uid: targetUid };
+});
+
+// ---- checkOrphanedUsers -----------------------------------------------------
+
+/**
+ * Cross-references every organizations/{orgId}/users profile against
+ * Firebase Auth and returns the uids with no matching Auth account —
+ * orphaned profiles that reactivateOrgUser will refuse to reactivate
+ * (see its auth/user-not-found handling above). The client can't
+ * determine this itself: checking whether an arbitrary uid has an Auth
+ * account isn't something the client SDK can do for anyone but the
+ * signed-in user, so this has to be a server-side, Admin-SDK lookup.
+ * Read-only — admin-only per assertActiveOrgAdmin, same as the rest of
+ * this section, but doesn't write anything (not even an audit log —
+ * there's nothing to record, this only reports existing state).
+ */
+export const checkOrphanedUsers = functions.https.onCall(async (_data, context) => {
+  const { orgId } = await assertActiveOrgAdmin(context);
+
+  const snap = await db.collection(`organizations/${orgId}/users`).get();
+  if (snap.empty) {
+    return { orphanedUids: [] };
+  }
+
+  const foundUids = new Set<string>();
+  const docs = snap.docs;
+  for (let i = 0; i < docs.length; i += 100) {
+    const chunk = docs.slice(i, i + 100);
+    const result = await adminAuth.getUsers(chunk.map((d) => ({ uid: d.id })));
+    result.users.forEach((u) => foundUids.add(u.uid));
+  }
+
+  return { orphanedUids: docs.map((d) => d.id).filter((uid) => !foundUids.has(uid)) };
+});
