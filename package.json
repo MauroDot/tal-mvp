@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "seed": "ts-node --project scripts/tsconfig.json scripts/setup-demo.ts"
+    "seed": "ts-node --project scripts/tsconfig.json scripts/setup-demo.ts",
+    "deploy:indexes": "firebase deploy --only firestore:indexes"
   },
   "dependencies": {
     "axios": "^1.20.0",

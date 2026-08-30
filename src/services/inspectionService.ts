@@ -167,27 +167,45 @@ export async function completeInspection(
 }
 
 /**
+ * Uploads a photo to Firebase Storage under `${storagePathPrefix}/{photoId}`
+ * and returns the generated `photoId` (a UUID, preserving the original
+ * file's extension when it has one). Shared by `uploadInspectionPhoto` and
+ * `uploadDefectPhoto`, which differ only in which folder they upload into.
+ */
+async function uploadPhoto(storagePathPrefix: string, file: File): Promise<string> {
+  const photoId = uuidv4();
+  const dotIndex = file.name.lastIndexOf(".");
+  const extension = dotIndex >= 0 ? file.name.slice(dotIndex) : "";
+
+  const photoRef = ref(storage, `${storagePathPrefix}/${photoId}${extension}`);
+  await uploadBytes(photoRef, file);
+
+  return photoId;
+}
+
+/**
  * Uploads a photo for an inspection to Firebase Storage under
  * `organizations/{orgId}/inspections/{inspectionId}/photos/{photoId}`
- * and returns the generated `photoId` (a UUID, preserving the original
- * file's extension when it has one).
+ * and returns the generated `photoId`.
  */
 export async function uploadInspectionPhoto(
   orgId: string,
   inspectionId: string,
   file: File
 ): Promise<string> {
-  const photoId = uuidv4();
-  const dotIndex = file.name.lastIndexOf(".");
-  const extension = dotIndex >= 0 ? file.name.slice(dotIndex) : "";
+  return uploadPhoto(`organizations/${orgId}/inspections/${inspectionId}/photos`, file);
+}
 
-  const photoRef = ref(
-    storage,
-    `organizations/${orgId}/inspections/${inspectionId}/photos/${photoId}${extension}`
-  );
-  await uploadBytes(photoRef, file);
-
-  return photoId;
+/**
+ * Uploads a photo for a standalone defect report (one not tied to any
+ * inspection — e.g. an ad hoc issue reported from a vehicle's page) to
+ * Firebase Storage under `organizations/{orgId}/defect-photos/{photoId}`
+ * and returns the generated `photoId`. Use this instead of
+ * `uploadInspectionPhoto` when there's no real `inspectionId` to scope
+ * the upload under.
+ */
+export async function uploadDefectPhoto(orgId: string, file: File): Promise<string> {
+  return uploadPhoto(`organizations/${orgId}/defect-photos`, file);
 }
 
 /**
